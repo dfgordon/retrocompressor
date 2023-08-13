@@ -163,8 +163,8 @@ struct AdaptiveHuffman {
     /// Frequencies, this is used as a sorting key.
     /// Parent node frequencies are the sum of the child node frequencies.
     freq: Vec<usize>,
-    /// 0..T are a map from child nodes to parent nodes
-    /// T..T+N_CHAR are a map from symbols to leaf nodes
+    /// 0..TAB_SIZE are a map from child nodes to parent nodes
+    /// TAB_SIZE..TAB_SIZE+N_CHAR are a map from symbols to leaf nodes
     prnt: Vec<usize>,
     /// Only the left sons are explicitly stored, but the right son
     /// is always adjacent, i.e. lson[i] = son[i], and rson[i] = son[i]+1.

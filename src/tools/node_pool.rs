@@ -1,4 +1,4 @@
-//! Binary tree set
+//! Node Pool backed Binary Tree
 //! 
 //! This is a binary tree, tuned for the task of indexing an LZSS dictionary.
 //! The nodes must take unique values from 0..LEN-1, where LEN is the size of the node pool.
