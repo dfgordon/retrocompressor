@@ -2,6 +2,12 @@
 name = "retrocompressor"
 version = "0.1.0"
 edition = "2021"
+readme = "README.md"
+license = "MIT OR other"
+description = "file compression with retro formats"
+keywords = ["compress","expand","retro","LZSS","Huffman"]
+repository = "https://github.com/dfgordon/retrocompressor"
+homepage = "https://github.com/dfgordon/retrocompressor"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
