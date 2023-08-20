@@ -5,8 +5,8 @@
 The starting motivation for this project is to provide a library that aids in the handling of TD0 files (Teledisk-compatible disk images).  It is envisioned that the scope will expand over time.
 
 At present this performs compression and expansion using LZSS with adaptive Huffman coding.  There are two variants:
-* `direct_ports::lzhuf` - nearly a direct port of the classic `LZHUF` of Okumura et al., parameters not adjustable, and likely under Okumura's license
-* `lzss_huff` - signficant rewrite of `LZHUF` with flexible parameters, probably less efficient
+* `direct_ports::lzhuf` - nearly a direct port of the classic `LZHUF` of Okumura et al.
+* `lzss_huff` - signficant rewrite of `LZHUF` with flexible parameters
 
 ## Size Limits
 
