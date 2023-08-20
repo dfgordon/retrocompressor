@@ -1,9 +1,10 @@
 use clap::{arg,crate_version,Command};
-use retrocompressor::{lzss_huff, direct_ports};
+use retrocompressor::{lzss_huff, td0, direct_ports, STD_OPTIONS};
+type STDRESULT = Result<(),Box<dyn std::error::Error>>;
 
 const RCH: &str = "unreachable was reached";
 
-fn main() -> Result<(),Box<dyn std::error::Error>>
+fn main() -> STDRESULT
 {
     let long_help =
 "Examples:
@@ -11,7 +12,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>>
 Compress:      `retrocompressor compress -m lzhuf -i my_compressed -o my_expanded`
 Expand:        `retrocompressor expand -m lzhuf -i my_expanded -o my_compressed`";
 
-    let methods = ["lzhuf-port","lzhuf"];
+    let methods = ["lzhuf-port","lzhuf","td0"];
 
     let mut main_cmd = Command::new("retrocompressor")
         .about("Compress and expand with retro formats")
@@ -36,32 +37,36 @@ Expand:        `retrocompressor expand -m lzhuf -i my_expanded -o my_compressed`
         let path_in = cmd.get_one::<String>("input").expect(RCH);
         let path_out = cmd.get_one::<String>("output").expect(RCH);
         let method = cmd.get_one::<String>("method").expect(RCH);
-        let dat = std::fs::read(path_in)?;
-        let compressed: Vec<u8> = match method.as_str() {
-            "lzhuf-port" => direct_ports::lzhuf::encode(&dat),
-            "lzhuf" => lzss_huff::compress(&dat)?,
+        let mut in_file = std::fs::File::open(path_in)?;
+        let mut out_file = std::fs::File::create(path_out)?;
+        let (in_size,out_size) = match method.as_str() {
+            "lzhuf-port" => direct_ports::lzhuf::encode(&mut in_file,&mut out_file)?,
+            "lzhuf" => lzss_huff::compress(&mut in_file,&mut out_file,&STD_OPTIONS)?,
+            "td0" => td0::compress(&mut in_file,&mut out_file)?,
             _ => {
                 eprintln!("{} not supported",method);
                 return Err(Box::new(std::fmt::Error));
             }
         };
-        std::fs::write(path_out,compressed)?;
+        eprintln!("compressed {} into {}",in_size,out_size);
     }
 
     if let Some(cmd) = matches.subcommand_matches("expand") {
         let path_in = cmd.get_one::<String>("input").expect(RCH);
         let path_out = cmd.get_one::<String>("output").expect(RCH);
         let method = cmd.get_one::<String>("method").expect(RCH);
-        let dat = std::fs::read(path_in)?;
-        let expanded: Vec<u8> = match method.as_str() {
-            "lzhuf-port" => direct_ports::lzhuf::decode(&dat),
-            "lzhuf" => lzss_huff::expand(&dat),
+        let mut in_file = std::fs::File::open(path_in)?;
+        let mut out_file = std::fs::File::create(path_out)?;
+        let (in_size,out_size) = match method.as_str() {
+            "lzhuf-port" => direct_ports::lzhuf::decode(&mut in_file,&mut out_file)?,
+            "lzhuf" => lzss_huff::expand(&mut in_file,&mut out_file,&STD_OPTIONS)?,
+            "td0" => td0::expand(&mut in_file,&mut out_file)?,
             _ => {
                 eprintln!("{} not supported",method);
                 return Err(Box::new(std::fmt::Error));
             }
         };
-        std::fs::write(path_out,expanded)?;
+        eprintln!("expanded {} into {}",in_size,out_size);
     }
 
     Ok(())   

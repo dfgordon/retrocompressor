@@ -4,6 +4,7 @@
 //! see the `direct_ports` module for more on the legacy.
 
 use bit_vec::BitVec;
+use std::io::{Read,Write,Seek,SeekFrom,BufWriter,BufReader};
 
 /// Components for the Huffman stage of compression.
 /// The tree is constantly updated as new data is decoded.
@@ -129,52 +130,56 @@ const D_CODE: [u8;256] = [
 
 impl AdaptiveHuffman {
     /// The `dat` argument is always the input, whether we are compressing or expanding.
-    pub fn create(dat: Vec<u8>,num_symbols: usize) -> Self {
-        Self {
+    pub fn create(num_symbols: usize) -> Self {
+        let mut ans = Self {
             max_freq: 0x8000,
             num_symb: num_symbols,
             node_count: 2*num_symbols - 1,
             root: 2*num_symbols - 2,
-            bits: BitVec::from_bytes(&dat),
+            bits: BitVec::new(),
             ptr: 0,
             freq: vec![0;2*num_symbols],
             parent: vec![0;2*num_symbols-1],
             son: vec![0;2*num_symbols-1],
             symb_map: vec![0;num_symbols]
-        }
-    }
-    pub fn advance(&mut self,bits: usize) {
-        self.ptr += bits;
-    }
-    /// initialize the Huffman tree
-    pub fn start_huff(&mut self) {
+        };
         // Leaves are stored first, one for each symbol (character)
         // leaves are signaled by son[i] >= node_count
-        for i in 0..self.num_symb {
-            self.freq[i] = 1;
-            self.son[i] = i + self.node_count;
-            self.symb_map[i] = i;
+        for i in 0..ans.num_symb {
+            ans.freq[i] = 1;
+            ans.son[i] = i + ans.node_count;
+            ans.symb_map[i] = i;
         }
         // Next construct the branches and root, there are num_symb-1 non-leaf nodes.
         // The sons will be 0,2,4,...,node_count-3, these are left sons, the right sons
         // are not explicitly stored, because we always have rson[i] = lson[i] + 1
-        // prnt will be n,n,n+1,n+1,n+2,n+2,...,n+node_count-1,n+node_count-1
+        // parent will be n,n,n+1,n+1,n+2,n+2,...,n+node_count-1,n+node_count-1
         // Frequency (freq) of a parent node is the sum of the frequencies attached to it.
         // Note the frequencies will be in ascending order.
         let mut i = 0;
-        let mut j = self.num_symb;
-        while j <= self.root {
-            self.freq[j] = self.freq[i] + self.freq[i+1];
-            self.son[j] = i;
-            self.parent[i] = j;
-            self.parent[i+1] = j;
+        let mut j = ans.num_symb;
+        while j <= ans.root {
+            ans.freq[j] = ans.freq[i] + ans.freq[i+1];
+            ans.son[j] = i;
+            ans.parent[i] = j;
+            ans.parent[i+1] = j;
             i += 2;
             j += 1;
         }
         // last frequency entry is a backstop that prevents any frequency from moving
         // beyond the end of the array (must be larger than any possible frequency)
-        self.freq[self.node_count] = 0xffff;
-        self.parent[self.root] = 0;
+        ans.freq[ans.node_count] = 0xffff;
+        ans.parent[ans.root] = 0;
+        ans
+    }
+    /// keep the bit vector small, we don't need the bits behind us
+    fn drop_leading_bits(&mut self) {
+        let cpy = self.bits.clone();
+        self.bits = BitVec::new();
+        for i in self.ptr..cpy.len() {
+            self.bits.push(cpy.get(i).unwrap());
+        }
+        self.ptr = 0;
     }
     /// Rebuild the adaptive Huffman tree, triggered by frequency hitting the maximum.
     fn rebuild_huff(&mut self) {
@@ -242,7 +247,7 @@ impl AdaptiveHuffman {
         if self.freq[self.root] == self.max_freq {
             self.rebuild_huff()
         }
-        // the leaf node corresponding to this character, "extra" part of prnt
+        // the leaf node corresponding to this character
         let mut c = self.symb_map[c0 as usize];
         // sorting loop, node pool is arranged in ascending frequency order
         loop {
@@ -286,33 +291,59 @@ impl AdaptiveHuffman {
             }
         }
     }
-    /// get the next bit based on the internal bit pointer
-    fn get_bit(&mut self) -> u8 {
+    /// Get the next bit reading from the stream as needed.
+    /// When EOF is reached 0 is returned, consistent with original C code.
+    /// `reader` should not be advanced outside this function until decoding is done.
+    fn get_bit<R: Read>(&mut self,reader: &mut BufReader<R>) -> Result<u8,std::io::Error> {
         match self.bits.get(self.ptr) {
             Some(bit) => {
                 self.ptr += 1;
-                bit as u8
+                Ok(bit as u8)
             },
-            None => 0
+            None => {
+                let mut by: [u8;1] = [0];
+                match reader.read_exact(&mut by) {
+                    Ok(()) => {
+                        if self.bits.len()>512 {
+                            self.drop_leading_bits();
+                        }
+                        self.bits.append(&mut BitVec::from_bytes(&by));
+                        self.get_bit(reader)
+                    }
+                    Err(e) => Err(e)
+                }
+            }
         }
     }
-    /// get the next 8 bits into a u16, used exlusively to decode the position
-    fn get_byte(&mut self) -> u8 {
+    /// get the next 8 bits into a u8, used exlusively to decode the position
+    fn get_byte<R: Read>(&mut self,bytes: &mut BufReader<R>) -> Result<u8,std::io::Error> {
         let mut ans: u8 = 0;
         for _i in 0..8 {
             ans <<= 1;
-            ans |= self.get_bit();
+            ans |= self.get_bit(bytes)?;
         }
-        ans
+        Ok(ans)
     }
-    /// output `num_bits` of `code` starting from the MSB
-    fn put_code(&mut self,num_bits: u16,mut code: u16,obuf: &mut BitVec) {
+    /// output `num_bits` of `code` starting from the MSB, unlike LZHUF.C the bits are always
+    /// written to the output stream (sometimes backing up and rewriting)
+    fn put_code<W: Write + Seek>(&mut self,num_bits: u16,mut code: u16,writer: &mut BufWriter<W>) {
         for _i in 0..num_bits {
-            obuf.push(code & 0x8000 > 0);
+            self.bits.push(code & 0x8000 > 0);
             code <<= 1;
+            self.ptr += 1;
+        }
+        let bytes = self.bits.to_bytes();
+        writer.write(&bytes.as_slice()).expect("write err");
+        if self.bits.len() % 8 > 0 {
+            writer.seek(SeekFrom::Current(-1)).expect("seek err");
+            self.ptr = 8 * (self.bits.len() / 8);
+            self.drop_leading_bits();
+        } else {
+            self.bits = BitVec::new();
+            self.ptr = 0;
         }
     }
-    pub fn encode_char(&mut self,c: u16,obuf: &mut BitVec) {
+    pub fn encode_char<W: Write + Seek>(&mut self,c: u16,writer: &mut BufWriter<W>) {
         let mut i: u16 = 0;
         let mut j: u16 = 0;
         let mut k: usize = self.symb_map[c as usize];
@@ -329,40 +360,39 @@ impl AdaptiveHuffman {
                 break;
             }
         }
-        self.put_code(j,i,obuf);
+        self.put_code(j,i,writer);
         self.update(c as i16); // TODO: why is input to update signed
     }
-    pub fn encode_position(&mut self,c: u16,obuf: &mut BitVec) {
+    pub fn encode_position<W: Write + Seek>(&mut self,c: u16,writer: &mut BufWriter<W>) {
         // upper 6 bits come from table
         let i = (c >> 6) as usize;
-        self.put_code(P_LEN[i] as u16,(P_CODE[i] as u16) << 8,obuf);
+        self.put_code(P_LEN[i] as u16,(P_CODE[i] as u16) << 8,writer);
         // lower 6 bits verbatim
-        self.put_code(6,(c & 0x3f) << 10,obuf);
+        self.put_code(6,(c & 0x3f) << 10,writer);
     }
-    pub fn decode_char(&mut self) -> i16 {
+    pub fn decode_char<R: Read>(&mut self,reader: &mut BufReader<R>) -> Result<i16,std::io::Error> {
         let mut c: usize = self.son[self.root];
         // travel from root to leaf, choosing the smaller child node (son[])
         // if the read bit is 0, the bigger (son[]+1) if read bit is 1
         while c < self.node_count {
-            c += self.get_bit() as usize;
+            c += self.get_bit(reader)? as usize;
             c = self.son[c];
         }
         c -= self.node_count;
         self.update(c as i16); // TODO: why is input to update signed
-        c as i16
+        Ok(c as i16)
     }
-    pub fn decode_position(&mut self) -> u16 {
+    pub fn decode_position<R: Read>(&mut self,reader: &mut BufReader<R>) -> Result<u16,std::io::Error> {
         // get upper 6 bits from table
-        let mut first8 = self.get_byte() as u16;
+        let mut first8 = self.get_byte(reader)? as u16;
         let upper6 = (D_CODE[first8 as usize] as u16) << 6;
         let coded_bits = D_LEN[first8 as usize] as u16;
         // read lower 6 bits verbatim
         // we already got 8 bits, we need another 6 - (8-coded_bits) = coded_bits - 2
         for _i in 0..coded_bits-2 {
             first8 <<= 1;
-            first8 += self.get_bit() as u16;
+            first8 += self.get_bit(reader)? as u16;
         }
-        upper6 | (first8 & 0x3f)
+        Ok(upper6 | (first8 & 0x3f))
     }
 }
-

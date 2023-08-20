@@ -61,7 +61,6 @@ fn offset() {
 fn distance() {
     // four positions 0 1 2 3
     // set position     ^       (wraps once)
-    // distance to          ^
     let mut ring = RingBuffer::create(4);
     ring.set_pos(5);
     assert_eq!(ring.get_pos(0),1);

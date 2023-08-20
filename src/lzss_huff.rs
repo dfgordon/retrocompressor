@@ -12,12 +12,13 @@
 //! among other problems.  One theory is this happens when it gets to the stage
 //! where the Huffman tree has to be rebuilt, and something goes amiss with the
 //! C integer types as interpreted by clang (compared to whatever old compiler).
-//! Neither this program nor the direct port exhibit such problems.
+//! Neither this module nor the direct port exhibit such problems.
 
-use bit_vec::BitVec;
 use crate::tools::node_pool::*;
 use crate::tools::ring_buffer::*;
 use crate::tools::adaptive_huff::*;
+use std::io::{Cursor,Read,Write,Seek,SeekFrom,BufReader,BufWriter,ErrorKind};
+use crate::DYNERR;
 
 // LZSS coding constants
 
@@ -57,8 +58,6 @@ impl LZSS {
         self.index.set_cursor(pos)?;
         self.index.drop_branch(Side::Left)?;
         self.index.drop_branch(Side::Right)?;
-        // self.index.cut_downward(Side::Left)?;
-        // self.index.cut_downward(Side::Right)?;
         // find or create root for this symbol
         let symbol = self.dictionary.get(0);
         let mut curs = match self.index.set_cursor_to_root(symbol as usize) {
@@ -91,7 +90,7 @@ impl LZSS {
                         // cannot get a better match than this, so remove the prior position from the index,
                         // and index this position in its place. TODO: this seems to break the assumption
                         // that farther from root means later in buffer.
-                        self.index.change_value(pos)?;
+                        self.index.change_value(pos,true)?;
                         return Ok(());
                     }
                 }
@@ -150,7 +149,7 @@ impl LZSS {
                         // Therefore we can simply attach the right branch to left branch's right branch.
                         // The updated left branch will be the replacement.
                         self.index.set_cursor(right)?;
-                        self.index.move_node(left, Side::Right)?;
+                        self.index.move_node(left, Side::Right,false)?;
                         left
                     },
                     [_,Some(_)] => {
@@ -163,7 +162,7 @@ impl LZSS {
                         match self.index.get_down()? {
                             [Some(_),None] => {
                                 self.index.down(Side::Left)?;
-                                self.index.move_node(terminus_dad,Side::Right)?;
+                                self.index.move_node(terminus_dad,Side::Right,false)?;
                             },
                             [None,None] => {},
                             _ => panic!("unexpected children")
@@ -171,9 +170,9 @@ impl LZSS {
                         // The 2 branches of p can now be attached to what was the terminus,
                         // whereas the terminus will be the replacement.
                         self.index.set_cursor(left)?;
-                        self.index.move_node(terminus,Side::Left)?;
+                        self.index.move_node(terminus,Side::Left,false)?;
                         self.index.set_cursor(right)?;
-                        self.index.move_node(terminus,Side::Right)?;
+                        self.index.move_node(terminus,Side::Right,false)?;
                         terminus
                     }
                 }
@@ -184,26 +183,36 @@ impl LZSS {
         if self.index.is_root()? {
             let symbol = self.index.get_symbol()?;
             self.index.set_cursor(replacement)?;
-            self.index.move_node_and_replace_root(symbol)
+            self.index.move_node_to_root(symbol,true)
 
         } else {
             let (parent,side) = self.index.get_parent_and_side()?;
             self.index.set_cursor(replacement)?;
-            self.index.move_node_and_replace(parent,side)
+            self.index.move_node(parent,side,true)
         }
     }
 }
 
-/// Main compression function
-pub fn compress(ibuf: &[u8]) -> Result<Vec<u8>,Error> {
-    let mut byte_ptr: usize = 0;
-    let mut ans = BitVec::new();
+/// Main compression function.
+/// `expanded_in` is an object with `Read` and `Seek` traits, usually `std::fs::File`, or `std::io::Cursor<&[u8]>`.
+/// `compressed_out` is an object with `Write` and `Seek` traits, usually `std::fs::File`, or `std::io::Cursor<Vec<u8>>`.
+/// Returns (in_size,out_size) or error, can panic if offsets are out of range.
+pub fn compress<R,W>(expanded_in: &mut R, compressed_out: &mut W, opt: &super::Options) -> Result<(u64,u64),DYNERR>
+where R: Read + Seek, W: Write + Seek {
+    let mut reader = BufReader::new(expanded_in);
+    let mut writer = BufWriter::new(compressed_out);
+    let expanded_length = reader.seek(SeekFrom::End(0))? - opt.in_offset;
+    reader.seek(SeekFrom::Start(opt.in_offset))?;
+    writer.seek(SeekFrom::Start(opt.out_offset))?;
+    // write the 32-bit header with length of expanded data
+    if opt.header {
+        let header = u32::to_le_bytes(expanded_length as u32);
+        writer.write(&header)?;
+    }
+    // init
+    let mut bytes = reader.bytes();
     let mut lzss = LZSS::new();
-    let mut huff = AdaptiveHuffman::create(ibuf.to_vec(),256 + LOOKAHEAD - THRESHOLD);
-    huff.start_huff();
-    // 32 bit header with length of expanded data
-    let mut textsize = BitVec::from_bytes(&u32::to_le_bytes(ibuf.len() as u32));
-    ans.append(&mut textsize);
+    let mut huff = AdaptiveHuffman::create(256 + LOOKAHEAD - THRESHOLD);
     // setup dictionary
     let start_pos = WIN_SIZE - LOOKAHEAD;
     for i in 0..start_pos {
@@ -212,13 +221,18 @@ pub fn compress(ibuf: &[u8]) -> Result<Vec<u8>,Error> {
     let mut len = 0;
     lzss.dictionary.set_pos(start_pos);
     while len < LOOKAHEAD {
-        if ibuf.len() <= len {
-            break;
+        match bytes.next() {
+            Some(Ok(c)) => {
+                lzss.dictionary.set(len as i64,c);
+                len += 1;
+            },
+            None => {
+                break;
+            },
+            Some(Err(e)) => {
+                return Err(Box::new(e));
+            }
         }
-        let c = ibuf[len];
-        lzss.dictionary.set(len as i64,c);
-        len += 1;
-        byte_ptr += 1;
     }
     for _i in 1..=LOOKAHEAD {
         lzss.dictionary.retreat();
@@ -233,21 +247,19 @@ pub fn compress(ibuf: &[u8]) -> Result<Vec<u8>,Error> {
         }
         if lzss.match_length <= THRESHOLD {
             lzss.match_length = 1;
-            huff.encode_char(lzss.dictionary.get(0) as u16,&mut ans);
+            huff.encode_char(lzss.dictionary.get(0) as u16,&mut writer);
         } else {
-            huff.encode_char((255-THRESHOLD+lzss.match_length) as u16,&mut ans);
-            huff.encode_position(lzss.match_offset as u16,&mut ans);
+            huff.encode_char((255-THRESHOLD+lzss.match_length) as u16,&mut writer);
+            huff.encode_position(lzss.match_offset as u16,&mut writer);
         }
         let last_match_length = lzss.match_length;
         let mut i = 0;
         while i < last_match_length {
-            let c: u8;
-            if byte_ptr < ibuf.len() {
-                c = ibuf[byte_ptr];
-                byte_ptr += 1;
-            } else {
-                break;
-            }
+            let c = match bytes.next() {
+                Some(Ok(c)) => c,
+                None => break,
+                Some(Err(e)) => return Err(Box::new(e))
+            };
             lzss.delete_node(LOOKAHEAD as i64)?;
             lzss.dictionary.set(LOOKAHEAD as i64,c);
             lzss.dictionary.advance();
@@ -267,71 +279,107 @@ pub fn compress(ibuf: &[u8]) -> Result<Vec<u8>,Error> {
             break;
         }
     }
-    Ok(ans.to_bytes())
+    writer.seek(SeekFrom::End(0))?; // coder could be rewound
+    writer.flush()?;
+    Ok((expanded_length,writer.stream_position()? - opt.out_offset))
 }
 
-/// Main decompression function
-pub fn expand(ibuf: &[u8]) -> Vec<u8>
-{
-    let mut ans = Vec::new();
-    let mut huff = AdaptiveHuffman::create(ibuf.to_vec(),256 + LOOKAHEAD - THRESHOLD);
+/// Main decompression function.
+/// `compressed_in` is an object with `Read` and `Seek` traits, usually `std::fs::File`, or `std::io::Cursor<&[u8]>`.
+/// `expanded_out` is an object with `Write` and `Seek` traits, usually `std::fs::File`, or `std::io::Cursor<Vec<u8>>`.
+/// Returns (in_size,out_size) or error, can panic if offsets are out of range.
+pub fn expand<R,W>(compressed_in: &mut R, expanded_out: &mut W, opt: &super::Options) -> Result<(u64,u64),DYNERR>
+where R: Read + Seek, W: Write + Seek {
+    let mut reader = BufReader::new(compressed_in);
+    let mut writer = BufWriter::new(expanded_out);
+    let compressed_size = reader.seek(SeekFrom::End(0))? - opt.in_offset;
+    reader.seek(SeekFrom::Start(opt.in_offset))?;
+    writer.seek(SeekFrom::Start(opt.out_offset))?;
+    // get size of expanded data from 32 bit header or set to max
+    let max_expanded_size = match opt.header {
+        true => {
+            let mut header: [u8;4] = [0;4];
+            reader.read_exact(&mut header)?;
+            u32::from_le_bytes(header)
+        }
+       false => u32::MAX
+    };
+    // init
+    let mut huff = AdaptiveHuffman::create(256 + LOOKAHEAD - THRESHOLD);
     let mut lzss= LZSS::new();
-	if ibuf.len() == 0 {
-		return ans;
-    }
-	huff.start_huff();
     let start_pos = WIN_SIZE - LOOKAHEAD;
 	for i in 0..start_pos {
 		lzss.dictionary.set(i as i64,b' ');
     }
     lzss.dictionary.set_pos(start_pos);
-    // get size of expanded data from header
-    let textsize = u32::from_le_bytes([ibuf[0],ibuf[1],ibuf[2],ibuf[3]]);
-    huff.advance(32);
     // start expanding
-	while ans.len() < textsize as usize {
-    //while huff.ptr < huff.bits.len() {
-		let c = huff.decode_char();
+	while writer.stream_position()? < max_expanded_size as u64 {
+		let c = match huff.decode_char(&mut reader) {
+            Ok(c) => c,
+            Err(e) if e.kind()==ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(Box::new(e))
+        };
 		if c < 256 {
-            ans.push(c as u8);
+            writer.write(&[c as u8])?;
 			lzss.dictionary.set(0,c as u8);
             lzss.dictionary.advance();
 		} else {
-			let offset = - (huff.decode_position() as i64 + 1);
+			let offset = match huff.decode_position(&mut reader) {
+                Ok(pos) => - (pos as i64 + 1),
+                Err(e) if e.kind()==ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(Box::new(e))
+            };    
 			let strlen = c as i64 + THRESHOLD as i64 - 255;
 			for _k in 0..strlen {
 				let c8 = lzss.dictionary.get(offset);
-                ans.push(c8);
+                writer.write(&[c8])?;
                 lzss.dictionary.set(0,c8 as u8);
                 lzss.dictionary.advance();
             }
 		}
-	}
-    ans
+    }
+    writer.flush()?;
+    Ok((compressed_size,writer.stream_position()? - opt.out_offset))
+}
+
+/// Convenience function, calls `compress` with a slice returning a Vec
+pub fn compress_slice(slice: &[u8],opt: &super::Options) -> Result<Vec<u8>,DYNERR> {
+    let mut src = Cursor::new(slice);
+    let mut ans: Cursor<Vec<u8>> = Cursor::new(Vec::new());
+    compress(&mut src,&mut ans,opt)?;
+    Ok(ans.into_inner())
+}
+
+/// Convenience function, calls `expand` with a slice returning a Vec
+pub fn expand_slice(slice: &[u8],opt: &super::Options) -> Result<Vec<u8>,DYNERR> {
+    let mut src = Cursor::new(slice);
+    let mut ans: Cursor<Vec<u8>> = Cursor::new(Vec::new());
+    expand(&mut src,&mut ans,opt)?;
+    Ok(ans.into_inner())
 }
 
 #[test]
 fn compression_works() {
     let test_data = "12345123456789123456789\n".as_bytes();
     let lzhuf_str = "18 00 00 00 DE EF B7 FC 0E 0C 70 13 85 C3 E2 71 64 81 19 60";
-    let compressed = compress(test_data).expect("compression failed");
+    let compressed = compress_slice(test_data,&crate::STD_OPTIONS).expect("compression failed");
     assert_eq!(compressed,hex::decode(lzhuf_str.replace(" ","")).unwrap());
 
     let test_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
     let lzhuf_str = "31 00 00 00 EA EB 3D BF 9C 4E FE 1E 16 EA 34 09 1C 0D C0 8C 02 FC 3F 77 3F 57 20 17 7F 1F 5F BF C6 AB 7F A5 AF FE 4C 39 96";
-    let compressed = compress(test_data).expect("compression failed");
+    let compressed = compress_slice(test_data,&crate::STD_OPTIONS).expect("compression failed");
     assert_eq!(compressed,hex::decode(lzhuf_str.replace(" ","")).unwrap());
 }
 
 #[test]
 fn invertibility() {
     let test_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
-    let compressed = compress(test_data).expect("compression failed");
-    let expanded = expand(&compressed);
+    let compressed = compress_slice(test_data,&crate::STD_OPTIONS).expect("compression failed");
+    let expanded = expand_slice(&compressed,&crate::STD_OPTIONS).expect("expansion failed");
     assert_eq!(test_data.to_vec(),expanded);
 
     let test_data = "1234567".as_bytes();
-    let compressed = compress(test_data).expect("compression failed");
-    let expanded = expand(&compressed);
+    let compressed = compress_slice(test_data,&crate::STD_OPTIONS).expect("compression failed");
+    let expanded = expand_slice(&compressed,&crate::STD_OPTIONS).expect("expansion failed");
     assert_eq!(test_data.to_vec(),expanded[0..7]);
 }

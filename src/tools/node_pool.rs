@@ -192,6 +192,7 @@ impl Tree {
         }
         let curs = self.chk_cursor()?;
         if self.pool[curs].down[side as usize].is_some() {
+            eprintln!("spawn: cannot overwrite {}",self.pool[curs].down[side as usize].unwrap());
             return Err(Error::NodeExists);
         }
         self.pool[curs].down[side as usize] = Some(val);
@@ -212,6 +213,7 @@ impl Tree {
             self.pool[curs].down = [None,None];
             return Ok(())
         }
+        eprintln!("spawn_root: cannot overwrite {}",curs);
         Err(Error::NodeExists)
     }
     /// Drop nodes at and below the cursor.  On exit cursor moves up.
@@ -270,47 +272,58 @@ impl Tree {
         Ok(())
     }
     /// Move node and everything below to a new parent.
-    /// If there is an existing child an error is returned.
-    /// Upon exit cursor points to the same node, only its parent has changed.
-    /// Node pool occupancy is unaffected.
-    pub fn move_node(&mut self,new_parent: usize,side: Side) -> Result<(),Error> {
-        let curs: usize = self.chk_cursor()?;
-        if self.pool[new_parent].down[side as usize]==None {
-            self.cut_upward()?;
-            self.pool[new_parent].down[side as usize] = Some(curs);
-            self.pool[curs].up = Some(new_parent);
-            return Ok(());
-        }
-        Err(Error::NodeExists)
-    }
-    /// Move node and everything below to a new parent.
     /// If node has an existing parent the link is cut.
-    /// If there is an existing branch it is dropped and replaced.
+    /// If there is an existing branch and `force==true` it is dropped and replaced.
+    /// If there is an existing branch and `force==false` an error is returned.
     /// Upon exit cursor points to the same node, only its parent has changed.
-    /// This may free up slots in the node pool.
-    pub fn move_node_and_replace(&mut self,new_parent: usize,side: Side) -> Result<(),Error> {
+    /// This may free up slots in the node pool if `force==true`.
+    pub fn move_node(&mut self,new_parent: usize,side: Side,force: bool) -> Result<(),Error> {
         let curs: usize = self.chk_cursor()?;
-        if self.pool[curs].up.is_some() {
-            self.cut_upward()?; // do first
+        match (self.pool[new_parent].down[side as usize],force) {
+            (None,_) => {
+                if self.pool[curs].up.is_some() {
+                    self.cut_upward()?; // do first
+                }
+            },
+            (Some(_),true) => {
+                if self.pool[curs].up.is_some() {
+                    self.cut_upward()?; // do first
+                }
+                self.set_cursor(new_parent)?;
+                self.drop_branch(side)?;
+                self.set_cursor(curs)?;
+            },
+            _ => {
+                eprintln!("move: cannot overwrite {}",self.pool[new_parent].down[side as usize].unwrap());
+                return Err(Error::NodeExists);
+            }
         }
-        self.set_cursor(new_parent)?;
-        self.drop_branch(side)?;
-        self.set_cursor(curs)?;
         self.pool[new_parent].down[side as usize] = Some(curs);
         self.pool[curs].up = Some(new_parent);
         return Ok(());
     }
-    /// Same as `move_node_and_replace` except target node is a root
-    pub fn move_node_and_replace_root(&mut self,symbol: usize) -> Result<(),Error> {
+    /// Same as `move_node` except target node is a root
+    pub fn move_node_to_root(&mut self,symbol: usize,force: bool) -> Result<(),Error> {
         let curs: usize = self.chk_cursor()?;
-        if self.pool[curs].up.is_some() {
-            self.cut_upward()?; // do first
+        match (self.roots[symbol],force) {
+            (None,_) => {
+                if self.pool[curs].up.is_some() {
+                    self.cut_upward()?; // do first
+                }
+            },
+            (Some(old_root),true) => {
+                if self.pool[curs].up.is_some() {
+                    self.cut_upward()?; // do first
+                }
+                self.set_cursor(old_root)?;
+                self.drop()?;
+                self.set_cursor(curs)?;
+            },
+            (Some(old_root),false) => {
+                eprintln!("move: cannot overwrite root {}",old_root);
+                return Err(Error::NodeExists);
+            }
         }
-        if let Some(old_root) = self.roots[symbol] {
-            self.set_cursor(old_root)?;
-            self.drop()?;
-        }
-        self.set_cursor(curs)?;
         self.roots[symbol] = Some(curs);
         self.pool[curs].up = None;
         self.pool[curs].symbol = Some(symbol);
@@ -318,32 +331,49 @@ impl Tree {
     }
     /// Change the value of a node.  This frees one slot in the node pool and uses another.
     /// The cursor stays on the node, but its value has changed.
-    pub fn change_value(&mut self,new_val: usize) -> Result<(),Error> {
+    /// If the new value is already used and `force==false` an error is returned,
+    /// if `force==true` the former occupant of the slot is deleted.
+    pub fn change_value(&mut self,new_val: usize,force: bool) -> Result<(),Error> {
         let old_val = self.chk_cursor()?;
-        if self.is_free(new_val)? {
-            if let Some(symbol) = self.pool[old_val].symbol {
-                self.roots[symbol] = Some(new_val);
-            }
-            if let Some(parent) = self.pool[old_val].up {
-                let (_,side) = self.get_parent_and_side()?;
-                self.pool[parent].down[side as usize] = Some(new_val);
-            }
-            if let Some(child) = self.pool[old_val].down[0] {
-                self.pool[child].up = Some(new_val);
-            }
-            if let Some(child) = self.pool[old_val].down[1] {
-                self.pool[child].up = Some(new_val);
-            }
-            self.pool[new_val] = self.pool[old_val].clone();
-            self.pool[new_val].val = new_val;
-            self.pool[old_val] = Node {
-                val: old_val,
-                symbol: None,
-                up: None,
-                down: [None,None]
-            };
-            self.curs = Some(new_val);
+        if new_val == old_val {
+            return Ok(());
         }
-        Err(Error::NodeExists)
+        match (self.is_free(new_val)?,force) {
+            (true,_) => {},
+            (false,false) => {
+                eprintln!("cannot change node value to {}",new_val);
+                return Err(Error::NodeExists)
+            },
+            (false,true) => {
+                self.set_cursor(new_val)?;
+                self.drop()?;
+                self.set_cursor(old_val)?;
+            }
+        }
+        // update links pointing into old_val
+        if let Some(symbol) = self.pool[old_val].symbol {
+            self.roots[symbol] = Some(new_val);
+        }
+        if let Some(parent) = self.pool[old_val].up {
+            let (_,side) = self.get_parent_and_side()?;
+            self.pool[parent].down[side as usize] = Some(new_val);
+        }
+        if let Some(child) = self.pool[old_val].down[0] {
+            self.pool[child].up = Some(new_val);
+        }
+        if let Some(child) = self.pool[old_val].down[1] {
+            self.pool[child].up = Some(new_val);
+        }
+        // update links pointing out of old_val and new_val 
+        self.pool[new_val] = self.pool[old_val].clone();
+        self.pool[new_val].val = new_val;
+        self.pool[old_val] = Node {
+            val: old_val,
+            symbol: None,
+            up: None,
+            down: [None,None]
+        };
+        self.curs = Some(new_val);
+        Ok(())
     }
 }

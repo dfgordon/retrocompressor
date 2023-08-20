@@ -8,8 +8,7 @@
 //! All rights reserved. Permission granted for non-commercial use.
 //! 
 //! Differences from `LZHUF`:
-//! * This transforms buffers, not files (we expect files that are easily buffered)
-//! * The crate `bit_vec` is used in place of original `LZHUF` bitstream machinery
+//! * File and bitstream handling is going to look different
 //! * Comments are greatly expanded and some identifiers are given longer names
 //! * Some components are gathered into structs
 //! * The 4 byte header is always little endian
@@ -23,6 +22,8 @@
 //! being interpreted by clang differently from the original intent.
 
 use bit_vec::BitVec;
+use std::io::{Cursor,Read,Write,Seek,SeekFrom,BufReader,BufWriter,Bytes};
+use crate::DYNERR;
 
 // LZSS coding constants
 
@@ -160,6 +161,7 @@ struct LZSS {
 struct AdaptiveHuffman {
     bits: BitVec,
     ptr: usize,
+    count: usize,
     /// Frequencies, this is used as a sorting key.
     /// Parent node frequencies are the sum of the child node frequencies.
     freq: Vec<usize>,
@@ -324,16 +326,27 @@ impl LZSS {
 }
 
 impl AdaptiveHuffman {
-    fn new(dat: Vec<u8>) -> Self {
+    /// must create a new object for each coding or decoding task
+    fn new() -> Self {
         Self {
-            bits: BitVec::from_bytes(&dat),
+            bits: BitVec::new(),
             ptr: 0,
+            count: 0,
             freq: vec![0;TAB_SIZE+1], // extra element is the frequency backstop
             prnt: vec![0;TAB_SIZE+N_CHAR], // extra N_CHAR elements are the symbol map
             son: vec![0;TAB_SIZE]
         }
     }
-    /// initialize the Huffman tree
+    /// keep the bit vector small, we don't need the bits behind us
+    fn drop_leading_bits(&mut self) {
+        let cpy = self.bits.clone();
+        self.bits = BitVec::new();
+        for i in self.ptr..cpy.len() {
+            self.bits.push(cpy.get(i).unwrap());
+        }
+        self.ptr = 0;
+    }
+    /// initialize the Huffman tree (does not reset bitstream)
     fn start_huff(&mut self) {
         // Leaves are stored first, one for each symbol (character)
         // leaves are signaled by son[i] >= TAB_SIZE, which is the region of
@@ -470,33 +483,62 @@ impl AdaptiveHuffman {
             }
         }
     }
-    /// get the next bit based on the internal bit pointer
-    fn get_bit(&mut self) -> u8 {
+    /// Get the next bit reading from the `bytes` iterator as needed.
+    /// When EOF is reached 0 is returned, consistent with original C code.
+    /// Byte iterator should not be advanced outside this function.
+    fn get_bit<R: Read>(&mut self,bytes: &mut Bytes<R>) -> u8 {
         match self.bits.get(self.ptr) {
             Some(bit) => {
                 self.ptr += 1;
                 bit as u8
             },
-            None => 0
+            None => {
+                match bytes.next() {
+                    Some(Ok(by)) => {
+                        if self.bits.len()>512 {
+                            self.drop_leading_bits();
+                        }
+                        self.bits.append(&mut BitVec::from_bytes(&[by]));
+                        self.count += 1;
+                        self.get_bit(bytes)
+                    }
+                    Some(Err(e)) => {
+                        panic!("error reading file {}",e)
+                    },
+                    None => 0
+                }
+            }
         }
     }
-    /// get the next 8 bits into a u16, used exlusively to decode the position
-    fn get_byte(&mut self) -> u8 {
+    /// get the next 8 bits into a u8, used exlusively to decode the position
+    fn get_byte<R: Read>(&mut self,bytes: &mut Bytes<R>) -> u8 {
         let mut ans: u8 = 0;
         for _i in 0..8 {
             ans <<= 1;
-            ans |= self.get_bit();
+            ans |= self.get_bit(bytes);
         }
         ans
     }
-    /// output `num_bits` of `code` starting from the MSB
-    fn put_code(&mut self,num_bits: u16,mut code: u16,obuf: &mut BitVec) {
+    /// output `num_bits` of `code` starting from the MSB, unlike LZHUF.C the bits are always
+    /// written to the output stream (sometimes backing up and rewriting)
+    fn put_code<W: Write + Seek>(&mut self,num_bits: u16,mut code: u16,writer: &mut BufWriter<W>) {
         for _i in 0..num_bits {
-            obuf.push(code & 0x8000 > 0);
+            self.bits.push(code & 0x8000 > 0);
             code <<= 1;
+            self.ptr += 1;
+        }
+        let bytes = self.bits.to_bytes();
+        writer.write(&bytes.as_slice()).expect("write err");
+        if self.bits.len() % 8 > 0 {
+            writer.seek(SeekFrom::Current(-1)).expect("seek err");
+            self.ptr = 8 * (self.bits.len() / 8);
+            self.drop_leading_bits();
+        } else {
+            self.bits = BitVec::new();
+            self.ptr = 0;
         }
     }
-    fn encode_char(&mut self,c: u16,obuf: &mut BitVec) {
+    fn encode_char<W: Write + Seek>(&mut self,c: u16,writer: &mut BufWriter<W>) {
         let mut i: u16 = 0;
         let mut j: u16 = 0;
         let mut k: usize = self.prnt[c as usize + TAB_SIZE];
@@ -513,54 +555,58 @@ impl AdaptiveHuffman {
                 break;
             }
         }
-        self.put_code(j,i,obuf);
+        self.put_code(j,i,writer);
         self.update(c as i16); // TODO: why is input to update signed
     }
-    fn encode_position(&mut self,c: u16,obuf: &mut BitVec) {
+    fn encode_position<W: Write + Seek>(&mut self,c: u16,writer: &mut BufWriter<W>) {
         // upper 6 bits come from table
         let i = (c >> 6) as usize;
-        self.put_code(P_LEN[i] as u16,(P_CODE[i] as u16) << 8,obuf);
+        self.put_code(P_LEN[i] as u16,(P_CODE[i] as u16) << 8,writer);
         // lower 6 bits verbatim
-        self.put_code(6,(c & 0x3f) << 10,obuf);
+        self.put_code(6,(c & 0x3f) << 10,writer);
     }
-    fn decode_char(&mut self) -> i16 {
+    fn decode_char<R: Read>(&mut self,bytes: &mut Bytes<R>) -> i16 {
         let mut c: usize = self.son[ROOT];
         // travel from root to leaf, choosing the smaller child node (son[])
         // if the read bit is 0, the bigger (son[]+1) if read bit is 1
         while c < TAB_SIZE {
-            c += self.get_bit() as usize;
+            c += self.get_bit(bytes) as usize;
             c = self.son[c];
         }
         c -= TAB_SIZE;
         self.update(c as i16); // TODO: why is input to update signed
         c as i16
     }
-    fn decode_position(&mut self) -> u16 {
+    fn decode_position<R: Read>(&mut self,bytes: &mut Bytes<R>) -> u16 {
         // get upper 6 bits from table
-        let mut first8 = self.get_byte() as u16;
+        let mut first8 = self.get_byte(bytes) as u16;
         let upper6 = (D_CODE[first8 as usize] as u16) << 6;
         let coded_bits = D_LEN[first8 as usize] as u16;
         // read lower 6 bits verbatim
         // we already got 8 bits, we need another 6 - (8-coded_bits) = coded_bits - 2
         for _i in 0..coded_bits-2 {
             first8 <<= 1;
-            first8 += self.get_bit() as u16;
+            first8 += self.get_bit(bytes) as u16;
         }
         upper6 | (first8 & 0x3f)
     }
 }
 
 /// Main compression function
-pub fn encode(ibuf: &[u8]) -> Vec<u8> {
-    let mut byte_ptr: usize = 0;
-    let mut ans = BitVec::new();
+pub fn encode<R: Read + Seek, W: Write + Seek>(expanded_in: &mut R, compressed_out: &mut W) -> Result<(u64,u64),DYNERR> {
+    let mut reader = BufReader::new(expanded_in);
+    let mut writer = BufWriter::new(compressed_out);
+    // write the 32-bit header with length of expanded data
+    let expanded_length = reader.seek(SeekFrom::End(0))?;
+    let header = u32::to_le_bytes(expanded_length as u32);
+    writer.write(&header)?;
+    reader.seek(SeekFrom::Start(0))?;
+    // init
+    let mut bytes = reader.bytes();
     let mut lzss = LZSS::new();
-    let mut huff = AdaptiveHuffman::new(ibuf.to_vec());
+    let mut huff = AdaptiveHuffman::new();
     huff.start_huff();
     lzss.init_tree();
-    // 32 bit header (`unsigned long int` in original C) with length of expanded data
-    let mut textsize = BitVec::from_bytes(&u32::to_le_bytes(ibuf.len() as u32));
-    ans.append(&mut textsize);
     // initialize LZSS dictionary
     let mut s = 0;
     let mut r = WIN_SIZE - LOOKAHEAD;
@@ -569,13 +615,18 @@ pub fn encode(ibuf: &[u8]) -> Vec<u8> {
     }
     let mut len = 0;
     while len < LOOKAHEAD {
-        if ibuf.len() <= len {
-            break;
+        match bytes.next() {
+            Some(Ok(c)) => {
+                lzss.dictionary[r+len] = c;
+                len += 1;
+            },
+            None => {
+                break;
+            },
+            Some(Err(e)) => {
+                return Err(Box::new(e));
+            }
         }
-        let c = ibuf[len];
-        lzss.dictionary[r+len] = c;
-        len += 1;
-        byte_ptr += 1;
     }
     for i in 1..=LOOKAHEAD {
         lzss.insert_node(r-i);
@@ -588,21 +639,19 @@ pub fn encode(ibuf: &[u8]) -> Vec<u8> {
         }
         if lzss.match_length <= THRESHOLD {
             lzss.match_length = 1;
-            huff.encode_char(lzss.dictionary[r] as u16,&mut ans);
+            huff.encode_char(lzss.dictionary[r] as u16,&mut writer);
         } else {
-            huff.encode_char((255-THRESHOLD+lzss.match_length) as u16,&mut ans);
-            huff.encode_position(lzss.match_position as u16,&mut ans);
+            huff.encode_char((255-THRESHOLD+lzss.match_length) as u16,&mut writer);
+            huff.encode_position(lzss.match_position as u16,&mut writer);
         }
         let last_match_length = lzss.match_length;
         let mut i = 0;
         while i < last_match_length {
-            let c: u8;
-            if byte_ptr < ibuf.len() {
-                c = ibuf[byte_ptr];
-                byte_ptr += 1;
-            } else {
-                break;
-            }
+            let c = match bytes.next() {
+                Some(Ok(c)) => c,
+                None => break,
+                Some(Err(e)) => return Err(Box::new(e))
+            };
             lzss.delete_node(s);
             lzss.dictionary[s] = c;
             if s < LOOKAHEAD - 1 {
@@ -629,73 +678,92 @@ pub fn encode(ibuf: &[u8]) -> Vec<u8> {
             break;
         }
     }
-    eprintln!("compressed {} to {} (counting 4-byte header)",ibuf.len(),1 + (ans.len()-1)/8);
-    ans.to_bytes()
+    writer.seek(SeekFrom::End(0))?; // coder could be rewound
+    writer.flush()?;
+    Ok((expanded_length,writer.stream_position()?))
 }
 
-/// Main decompression function
-pub fn decode(ibuf: &[u8]) -> Vec<u8>
+/// Main decompression function.
+/// Returns (compressed size, expanded size) or error.
+pub fn decode<R: Read + Seek , W: Write + Seek>(compressed_in: &mut R, expanded_out: &mut W) -> Result<(u64,u64),DYNERR>
 {
-    let mut ans = Vec::new();
-    let mut huff = AdaptiveHuffman::new(ibuf.to_vec());
+    let mut reader = BufReader::new(compressed_in);
+    let mut writer = BufWriter::new(expanded_out);
+    // get size of expanded data from 32 bit header
+    let mut header: [u8;4] = [0;4];
+    reader.read_exact(&mut header)?;
+    let textsize = u32::from_le_bytes(header);
+    // init
+    let mut bytes = reader.bytes();
+    let mut huff = AdaptiveHuffman::new();
     let mut lzss= LZSS::new();
-	if ibuf.len() == 0 {
-		return ans;
-    }
 	huff.start_huff();
 	for i in 0..WIN_SIZE - LOOKAHEAD {
 		lzss.dictionary[i] = b' ';
     }
 	let mut r = WIN_SIZE - LOOKAHEAD;
-    // get size of expanded data from header
-    let textsize = u32::from_le_bytes([ibuf[0],ibuf[1],ibuf[2],ibuf[3]]);
-    huff.ptr += 32;
     // start expanding
-	while ans.len() < textsize as usize {
-		let c = huff.decode_char();
+	while writer.stream_position()? < textsize as u64 {
+		let c = huff.decode_char(&mut bytes);
 		if c < 256 {
-            ans.push(c as u8);
+            writer.write(&[c as u8])?;
 			lzss.dictionary[r] = c as u8;
             r += 1;
 			r &= WIN_SIZE - 1;
 		} else {
-			let strpos = ((r as i32 - huff.decode_position() as i32 - 1) & (WIN_SIZE as i32 - 1)) as usize;
+			let strpos = ((r as i32 - huff.decode_position(&mut bytes) as i32 - 1) & (WIN_SIZE as i32 - 1)) as usize;
 			let strlen = c as usize + THRESHOLD - 255;
 			for k in 0..strlen {
 				let c8 = lzss.dictionary[(strpos + k) & (WIN_SIZE - 1)];
-                ans.push(c8);
+                writer.write(&[c8])?;
 				lzss.dictionary[r] = c8;
                 r += 1;
 				r &= WIN_SIZE - 1;
 			}
 		}
 	}
-    eprintln!("expanded {} to {}",ibuf.len(),ans.len());
-    ans
+    writer.flush()?;
+    Ok((huff.count as u64,writer.stream_position()?))
+}
+
+/// Convenience function, calls `decode` with a slice returning a Vec
+pub fn decode_slice(slice: &[u8]) -> Result<Vec<u8>,DYNERR> {
+    let mut src = Cursor::new(slice);
+    let mut ans: Cursor<Vec<u8>> = Cursor::new(Vec::new());
+    decode(&mut src,&mut ans)?;
+    Ok(ans.into_inner())
+}
+
+/// Convenience function, calls `encode` with a slice returning a Vec
+pub fn encode_slice(slice: &[u8]) -> Result<Vec<u8>,DYNERR> {
+    let mut src = Cursor::new(slice);
+    let mut ans: Cursor<Vec<u8>> = Cursor::new(Vec::new());
+    encode(&mut src,&mut ans)?;
+    Ok(ans.into_inner())
 }
 
 #[test]
 fn compression_works() {
     let test_data = "12345123456789123456789\n".as_bytes();
     let lzhuf_str = "18 00 00 00 DE EF B7 FC 0E 0C 70 13 85 C3 E2 71 64 81 19 60";
-    let compressed = encode(test_data);
+    let compressed = encode_slice(test_data).expect("encoding failed");
     assert_eq!(compressed,hex::decode(lzhuf_str.replace(" ","")).unwrap());
 
     let test_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
     let lzhuf_str = "31 00 00 00 EA EB 3D BF 9C 4E FE 1E 16 EA 34 09 1C 0D C0 8C 02 FC 3F 77 3F 57 20 17 7F 1F 5F BF C6 AB 7F A5 AF FE 4C 39 96";
-    let compressed = encode(test_data);
+    let compressed = encode_slice(test_data).expect("encoding failed");
     assert_eq!(compressed,hex::decode(lzhuf_str.replace(" ","")).unwrap());
 }
 
 #[test]
 fn invertibility() {
     let test_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
-    let compressed = encode(test_data);
-    let expanded = decode(&compressed);
+    let compressed = encode_slice(test_data).expect("encoding failed");
+    let expanded = decode_slice(&compressed).expect("decoding failed");
     assert_eq!(test_data.to_vec(),expanded);
 
     let test_data = "1234567".as_bytes();
-    let compressed = encode(test_data);
-    let expanded = decode(&compressed);
+    let compressed = encode_slice(test_data).expect("encoding failed");
+    let expanded = decode_slice(&compressed).expect("decoding failed");
     assert_eq!(test_data.to_vec(),expanded[0..7]);
 }

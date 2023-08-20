@@ -1,30 +1,38 @@
 use assert_cmd::prelude::*; // Add methods on commands
 use std::path::{PathBuf,Path};
 use std::process::Command; // Run programs
+use std::io::{BufReader, BufWriter, Read, ErrorKind, Write};
 use tempfile;
+type DYNERR = Box<dyn std::error::Error>;
 type STDRESULT = Result<(),Box<dyn std::error::Error>>;
 
 // Make a copy in temporary directory with the specified newline token.
 // This insulates us against newline substitutions inserted by git or other layers.
 // The starting newline must either be LF or CRLF.
-fn copy_and_fix_newlines(in_file: PathBuf,temp_dir: &tempfile::TempDir,tok: &[u8]) -> Result<PathBuf,Box<dyn std::error::Error>> {
-    let txt = std::fs::read(in_file).expect("could not read input file");
-    let mut new_txt: Vec<u8> = Vec::new();
-    let mut last_char: u8 = 255;
-    for i in 0..txt.len() {
-        if txt[i]==13 || txt[i]==10 && last_char!=13 {
-            new_txt.append(&mut tok.to_vec());
+fn copy_and_fix_newlines(in_file: PathBuf,temp_dir: &tempfile::TempDir,tok: &[u8]) -> Result<PathBuf,DYNERR> {
+    let in_file = std::fs::File::open(in_file)?;
+    let out_path = temp_dir.path().join("converted.txt");
+    let out_file = std::fs::File::create(&out_path)?;
+    let mut reader = BufReader::new(in_file);
+    let mut writer = BufWriter::new(out_file);
+    let mut prev: u8 = 255;
+    let mut curr: [u8;1] = [0];
+    loop {
+        match reader.read_exact(&mut curr) {
+            Ok(_) => {
+                if curr[0]==13 || curr[0]==10 && prev!=13 {
+                    writer.write_all(&mut tok.clone())?;
+                }
+                else if curr[0]!=10 {
+                    writer.write_all(&mut curr.clone())?;
+                }
+                prev = curr[0]
+            }
+            Err(e) if e.kind()==ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(Box::new(e))
         }
-        else if txt[i]!=10 {
-            new_txt.push(txt[i]);
-        }
-        last_char = txt[i];
     }
-    let new_txt_path = temp_dir.path().join("converted.txt");
-    match std::fs::write(&new_txt_path,new_txt) {
-        Ok(_) => Ok(new_txt_path),
-        Err(e) => Err(Box::new(e))
-    }
+    Ok(out_path)
 }
 
 fn compress_test(base_name: &str,xext: &str,cext: &str,method: &str) -> STDRESULT {
@@ -71,6 +79,35 @@ fn expand_test(base_name: &str,xext: &str,cext: &str,method: &str) -> STDRESULT 
     Ok(())
 }
 
+fn invertibility_test(file_name: &str,method: &str) -> STDRESULT {
+    // newlines don't matter, no reference in this case
+    let temp_dir = tempfile::tempdir()?;
+    let in_path = Path::new("tests").join(file_name);
+    let intermediate = temp_dir.path().join([file_name,"1"].concat());
+    let out_path = temp_dir.path().join([file_name,"2"].concat());
+    let mut cmd = Command::cargo_bin("retrocompressor")?;
+    cmd.arg("compress")
+        .arg("-m").arg(method)
+        .arg("-i").arg(&in_path)
+        .arg("-o").arg(&intermediate)
+        .assert()
+        .success();
+    let mut cmd = Command::cargo_bin("retrocompressor")?;
+    cmd.arg("expand")
+        .arg("-m").arg(method)
+        .arg("-i").arg(&intermediate)
+        .arg("-o").arg(&out_path)
+        .assert()
+        .success();
+    match (std::fs::read(in_path),std::fs::read(out_path)) {
+        (Ok(v1),Ok(v2)) => {
+            assert_eq!(v1,v2);
+        },
+        _ => panic!("unable to compare files")
+    }
+    Ok(())
+}
+
 #[test]
 fn lzhuf_port_compression() -> STDRESULT {
     compress_test("hamlet_act_1","txt","lzh","lzhuf-port")?;
@@ -93,4 +130,16 @@ fn lzhuf_port_expansion() -> STDRESULT {
 fn lzhuf_expansion() -> STDRESULT {
     expand_test("hamlet_act_1","txt","lzh","lzhuf")?;
     expand_test("tempest_act_5","txt","lzh","lzhuf")
+}
+
+#[test]
+fn lzhuf_port_invertibility() -> STDRESULT {
+    invertibility_test("hamlet_full.txt", "lzhuf-port")?;
+    invertibility_test("shkspr.dsk", "lzhuf-port")
+}
+
+#[test]
+fn lzhuf_invertibility() -> STDRESULT {
+    invertibility_test("hamlet_full.txt", "lzhuf")?;
+    invertibility_test("shkspr.dsk", "lzhuf")
 }
