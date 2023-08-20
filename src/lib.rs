@@ -42,7 +42,9 @@ pub enum Error {
     #[error("file format mismatch")]
     FileFormatMismatch,
     #[error("file too large")]
-    FileTooLarge
+    FileTooLarge,
+    #[error("checksum failed")]
+    BadChecksum
 }
 
 /// Options controlling compression

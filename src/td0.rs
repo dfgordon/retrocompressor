@@ -2,7 +2,7 @@
 //! 
 //! This module allows enabling or disabling of advanced compression in
 //! TD0 image files.  This does not do any analysis of the TD0 image, it
-//! only verifies and updates the 2-byte signature, and compresses or
+//! only verifies and updates the 2-byte signature, CRC, and compresses or
 //! expands everything following the 12-byte header.
 //! 
 //! Because TD0 does not store the size of the expanded image, there can be
@@ -13,17 +13,37 @@ use std::io::{Cursor,Read,Write,Seek};
 use crate::DYNERR;
 use crate::lzss_huff;
 
+/// Calculate the checksum for the TD0 data in `buf`.
+/// This is only used for the image header, the several other CRC in the TD0 require
+/// no explicit handling at the level of this module.
+pub fn crc16(crc_seed: u16, buf: &[u8]) -> u16
+{
+    let mut crc: u16 = crc_seed;
+    for i in 0..buf.len() {
+        crc ^= (buf[i] as u16) << 8;
+        for _bit in 0..8 {
+            crc = (crc << 1) ^ match crc & 0x8000 { 0 => 0, _ => 0xa097 };
+        }
+    }
+    crc
+}
+
 /// Convert a TD0 image from advanced compression to normal.
 /// The heavy lifting is done by the `lzss_huff` module.
 pub fn expand<R,W>(compressed_in: &mut R, expanded_out: &mut W) -> Result<(u64,u64),DYNERR>
 where R: Read + Seek, W: Write + Seek {
     let mut td_header: [u8;12] = [0;12];
     compressed_in.read_exact(&mut td_header)?;
-    if td_header[0]!=b't' || td_header[1]!=b'd' {
+    if &td_header[0..2] != "td".as_bytes() {
         return Err(Box::new(crate::Error::FileFormatMismatch))
     }
-    td_header[0] = b'T';
-    td_header[1] = b'D';
+    let crc = u16::to_le_bytes(crc16(0,&td_header[0..10]));
+    if crc!=td_header[10..12] {
+        return Err(Box::new(crate::Error::BadChecksum))
+    }
+    td_header[0..2].copy_from_slice("TD".as_bytes());
+    let crc = u16::to_le_bytes(crc16(0,&td_header[0..10]));
+    td_header[10..12].copy_from_slice(&crc);
     expanded_out.write_all(&td_header)?;
     let opt = crate::Options {
         header: false,
@@ -44,11 +64,16 @@ pub fn compress<R,W>(expanded_in: &mut R, compressed_out: &mut W) -> Result<(u64
 where R: Read + Seek, W: Write + Seek {
     let mut td_header: [u8;12] = [0;12];
     expanded_in.read_exact(&mut td_header)?;
-    if td_header[0]!=b'T' || td_header[1]!=b'D' {
+    if &td_header[0..2] != "TD".as_bytes() {
         return Err(Box::new(crate::Error::FileFormatMismatch))
     }
-    td_header[0] = b't';
-    td_header[1] = b'd';
+    let crc = u16::to_le_bytes(crc16(0,&td_header[0..10]));
+    if crc!=td_header[10..12] {
+        return Err(Box::new(crate::Error::BadChecksum))
+    }
+    td_header[0..2].copy_from_slice("td".as_bytes());
+    let crc = u16::to_le_bytes(crc16(0,&td_header[0..10]));
+    td_header[10..12].copy_from_slice(&crc);
     compressed_out.write_all(&td_header)?;
     let opt = crate::Options {
         header: false,
@@ -81,20 +106,28 @@ pub fn expand_slice(slice: &[u8]) -> Result<Vec<u8>,DYNERR> {
 
 #[test]
 fn compression_works() {
-    let test_data = "TD0123456789I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
-    let lzhuf_str = "EA EB 3D BF 9C 4E FE 1E 16 EA 34 09 1C 0D C0 8C 02 FC 3F 77 3F 57 20 17 7F 1F 5F BF C6 AB 7F A5 AF FE 4C 39 96";
-    let compressed = compress_slice(test_data).expect("compression failed");
-    let expected = [
-        "td0123456789".as_bytes().to_vec(),
-        hex::decode(lzhuf_str.replace(" ","")).unwrap()
-    ].concat();
+    let mut normal_header = "TD0123456789".as_bytes().to_vec();
+    let normal_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes().to_vec();
+    let crc = u16::to_le_bytes(crc16(0,&normal_header[0..10]));
+    normal_header[10..12].copy_from_slice(&crc);
+
+    let mut advanced_header = "td0123456789".as_bytes().to_vec();
+    let advanced_data = "EA EB 3D BF 9C 4E FE 1E 16 EA 34 09 1C 0D C0 8C 02 FC 3F 77 3F 57 20 17 7F 1F 5F BF C6 AB 7F A5 AF FE 4C 39 96";
+    let crc = u16::to_le_bytes(crc16(0,&advanced_header[0..10]));
+    advanced_header[10..12].copy_from_slice(&crc);
+
+    let test_data = [normal_header,normal_data].concat();
+    let compressed = compress_slice(&test_data).expect("compression failed");
+    let expected = [advanced_header,hex::decode(advanced_data.replace(" ","")).unwrap()].concat();
     assert_eq!(compressed,expected);
 }
 
 #[test]
 fn invertibility() {
-    let test_data = "TD0123456789I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
-    let compressed = compress_slice(test_data).expect("compression failed");
+    let mut test_data = "TD0123456789I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes().to_vec();
+    let crc = u16::to_le_bytes(crc16(0,&test_data[0..10]));
+    test_data[10..12].copy_from_slice(&crc);
+    let compressed = compress_slice(&test_data).expect("compression failed");
     let expanded = expand_slice(&compressed).expect("expansion failed");
     assert_eq!(test_data.to_vec(),expanded);
 }
