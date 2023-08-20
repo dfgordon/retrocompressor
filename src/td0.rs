@@ -1,4 +1,4 @@
-//! Teledisk compression
+//! Teledisk-compatible compression
 //! 
 //! This module allows enabling or disabling of advanced compression in
 //! TD0 image files.  This does not do any analysis of the TD0 image, it
@@ -28,7 +28,11 @@ where R: Read + Seek, W: Write + Seek {
     let opt = crate::Options {
         header: false,
         in_offset: 12,
-        out_offset: 12
+        out_offset: 12,
+        window_size: 4096,
+        threshold: 2,
+        lookahead: 60,
+        precursor: b' '
     };
     let (in_size,out_size) = lzss_huff::expand(compressed_in,expanded_out,&opt)?;
     Ok((in_size,out_size))
@@ -49,7 +53,11 @@ where R: Read + Seek, W: Write + Seek {
     let opt = crate::Options {
         header: false,
         in_offset: 12,
-        out_offset: 12
+        out_offset: 12,
+        window_size: 4096,
+        threshold: 2,
+        lookahead: 60,
+        precursor: b' '
     };
     let (in_size,out_size) = lzss_huff::compress(expanded_in,compressed_out,&opt)?;
     Ok((in_size,out_size))

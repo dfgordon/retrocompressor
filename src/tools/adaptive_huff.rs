@@ -6,15 +6,13 @@
 use bit_vec::BitVec;
 use std::io::{Read,Write,Seek,SeekFrom,BufWriter,BufReader};
 
-/// Components for the Huffman stage of compression.
-/// The tree is constantly updated as new data is decoded.
-pub struct AdaptiveHuffman {
+/// Tree used for both encoding and decoding.
+/// The tree is constantly updated during either operation.
+pub struct AdaptiveHuffmanTree {
     max_freq: usize,
     num_symb: usize,
     node_count: usize,
     root: usize,
-    bits: BitVec,
-    ptr: usize,
     /// node frequency and sorting key, extra is the frequency backstop
     freq: Vec<usize>,
     /// index of parent node of the node in this slot
@@ -23,6 +21,18 @@ pub struct AdaptiveHuffman {
     son: Vec<usize>,
     /// map from symbols (index) to leaves (value)
     symb_map: Vec<usize>
+}
+
+pub struct AdaptiveHuffmanCoder {
+    tree: AdaptiveHuffmanTree,
+    bits: BitVec,
+    ptr: usize,
+}
+
+pub struct AdaptiveHuffmanDecoder {
+    tree: AdaptiveHuffmanTree,
+    bits: BitVec,
+    ptr: usize,
 }
 
 /// encoding table giving number of bits used to encode the
@@ -128,16 +138,13 @@ const D_CODE: [u8;256] = [
 	0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
 ];
 
-impl AdaptiveHuffman {
-    /// The `dat` argument is always the input, whether we are compressing or expanding.
+impl AdaptiveHuffmanTree {
     pub fn create(num_symbols: usize) -> Self {
         let mut ans = Self {
             max_freq: 0x8000,
             num_symb: num_symbols,
             node_count: 2*num_symbols - 1,
             root: 2*num_symbols - 2,
-            bits: BitVec::new(),
-            ptr: 0,
             freq: vec![0;2*num_symbols],
             parent: vec![0;2*num_symbols-1],
             son: vec![0;2*num_symbols-1],
@@ -171,15 +178,6 @@ impl AdaptiveHuffman {
         ans.freq[ans.node_count] = 0xffff;
         ans.parent[ans.root] = 0;
         ans
-    }
-    /// keep the bit vector small, we don't need the bits behind us
-    fn drop_leading_bits(&mut self) {
-        let cpy = self.bits.clone();
-        self.bits = BitVec::new();
-        for i in self.ptr..cpy.len() {
-            self.bits.push(cpy.get(i).unwrap());
-        }
-        self.ptr = 0;
     }
     /// Rebuild the adaptive Huffman tree, triggered by frequency hitting the maximum.
     fn rebuild_huff(&mut self) {
@@ -291,6 +289,89 @@ impl AdaptiveHuffman {
             }
         }
     }
+}
+
+impl AdaptiveHuffmanCoder {
+    pub fn create(num_symbols: usize) -> Self {
+        Self {
+            tree: AdaptiveHuffmanTree::create(num_symbols),
+            bits: BitVec::new(),
+            ptr: 0
+        }
+    }
+    /// keep the bit vector small, we don't need the bits behind us
+    fn drop_leading_bits(&mut self) {
+        let cpy = self.bits.clone();
+        self.bits = BitVec::new();
+        for i in self.ptr..cpy.len() {
+            self.bits.push(cpy.get(i).unwrap());
+        }
+        self.ptr = 0;
+    }
+    /// output `num_bits` of `code` starting from the MSB, unlike LZHUF.C the bits are always
+    /// written to the output stream (sometimes backing up and rewriting)
+    fn put_code<W: Write + Seek>(&mut self,num_bits: u16,mut code: u16,writer: &mut BufWriter<W>) {
+        for _i in 0..num_bits {
+            self.bits.push(code & 0x8000 > 0);
+            code <<= 1;
+            self.ptr += 1;
+        }
+        let bytes = self.bits.to_bytes();
+        writer.write(&bytes.as_slice()).expect("write err");
+        if self.bits.len() % 8 > 0 {
+            writer.seek(SeekFrom::Current(-1)).expect("seek err");
+            self.ptr = 8 * (self.bits.len() / 8);
+            self.drop_leading_bits();
+        } else {
+            self.bits = BitVec::new();
+            self.ptr = 0;
+        }
+    }
+    pub fn encode_char<W: Write + Seek>(&mut self,c: u16,writer: &mut BufWriter<W>) {
+        let mut code: u16 = 0;
+        let mut num_bits: u16 = 0;
+        let mut curr_node: usize = self.tree.symb_map[c as usize];
+        // This is the Huffman scheme: going from leaf to root, add a 0 bit if we
+        // are coming from the left, or a 1 bit if we are coming from the right.
+        loop {
+            code >>= 1;
+            // if node's address is odd-numbered, we are coming from the right
+            code += (curr_node as u16 & 1) << 15;
+            num_bits += 1;
+            curr_node = self.tree.parent[curr_node];
+            if curr_node==self.tree.root {
+                break;
+            }
+        }
+        self.put_code(num_bits,code,writer);
+        self.tree.update(c as i16); // TODO: why is input to update signed
+    }
+    pub fn encode_position<W: Write + Seek>(&mut self,c: u16,writer: &mut BufWriter<W>) {
+        // upper 6 bits come from table
+        let i = (c >> 6) as usize;
+        self.put_code(P_LEN[i] as u16,(P_CODE[i] as u16) << 8,writer);
+        // lower 6 bits verbatim
+        self.put_code(6,(c & 0x3f) << 10,writer);
+    }
+}
+
+impl AdaptiveHuffmanDecoder {
+    pub fn create(num_symbols: usize) -> Self {
+        Self {
+            tree: AdaptiveHuffmanTree::create(num_symbols),
+            bits: BitVec::new(),
+            ptr: 0
+        }
+    }
+    /// keep the bit vector small, we don't need the bits behind us
+    fn drop_leading_bits(&mut self) {
+        let cpy = self.bits.clone();
+        self.bits = BitVec::new();
+        for i in self.ptr..cpy.len() {
+            self.bits.push(cpy.get(i).unwrap());
+        }
+        self.ptr = 0;
+    }
     /// Get the next bit reading from the stream as needed.
     /// When EOF is reached 0 is returned, consistent with original C code.
     /// `reader` should not be advanced outside this function until decoding is done.
@@ -324,62 +405,17 @@ impl AdaptiveHuffman {
         }
         Ok(ans)
     }
-    /// output `num_bits` of `code` starting from the MSB, unlike LZHUF.C the bits are always
-    /// written to the output stream (sometimes backing up and rewriting)
-    fn put_code<W: Write + Seek>(&mut self,num_bits: u16,mut code: u16,writer: &mut BufWriter<W>) {
-        for _i in 0..num_bits {
-            self.bits.push(code & 0x8000 > 0);
-            code <<= 1;
-            self.ptr += 1;
-        }
-        let bytes = self.bits.to_bytes();
-        writer.write(&bytes.as_slice()).expect("write err");
-        if self.bits.len() % 8 > 0 {
-            writer.seek(SeekFrom::Current(-1)).expect("seek err");
-            self.ptr = 8 * (self.bits.len() / 8);
-            self.drop_leading_bits();
-        } else {
-            self.bits = BitVec::new();
-            self.ptr = 0;
-        }
-    }
-    pub fn encode_char<W: Write + Seek>(&mut self,c: u16,writer: &mut BufWriter<W>) {
-        let mut i: u16 = 0;
-        let mut j: u16 = 0;
-        let mut k: usize = self.symb_map[c as usize];
-        // travel from leaf to root
-        loop {
-            i >>= 1;
-            // if node's address is odd-numbered, choose bigger brother node
-            if k & 1 > 0 {
-                i += 0x8000;
-            }
-            j += 1;
-            k = self.parent[k];
-            if k==self.root {
-                break;
-            }
-        }
-        self.put_code(j,i,writer);
-        self.update(c as i16); // TODO: why is input to update signed
-    }
-    pub fn encode_position<W: Write + Seek>(&mut self,c: u16,writer: &mut BufWriter<W>) {
-        // upper 6 bits come from table
-        let i = (c >> 6) as usize;
-        self.put_code(P_LEN[i] as u16,(P_CODE[i] as u16) << 8,writer);
-        // lower 6 bits verbatim
-        self.put_code(6,(c & 0x3f) << 10,writer);
-    }
     pub fn decode_char<R: Read>(&mut self,reader: &mut BufReader<R>) -> Result<i16,std::io::Error> {
-        let mut c: usize = self.son[self.root];
-        // travel from root to leaf, choosing the smaller child node (son[])
-        // if the read bit is 0, the bigger (son[]+1) if read bit is 1
-        while c < self.node_count {
+        let mut c: usize = self.tree.son[self.tree.root];
+        // This is the Huffman scheme: go from root to leaf, branching left or right depending on the
+        // successive bits.  The nodes are arranged so that branching left or right means adding 0 or
+        // 1 to the index.  Remember leaves are signaled by son >= node_count.
+        while c < self.tree.node_count {
             c += self.get_bit(reader)? as usize;
-            c = self.son[c];
+            c = self.tree.son[c];
         }
-        c -= self.node_count;
-        self.update(c as i16); // TODO: why is input to update signed
+        c -= self.tree.node_count;
+        self.tree.update(c as i16); // TODO: why is input to update signed
         Ok(c as i16)
     }
     pub fn decode_position<R: Read>(&mut self,reader: &mut BufReader<R>) -> Result<u16,std::io::Error> {

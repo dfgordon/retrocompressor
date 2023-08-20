@@ -115,9 +115,9 @@ fn lzhuf_port_compression() -> STDRESULT {
 }
 
 #[test]
-fn lzhuf_compression() -> STDRESULT {
-    compress_test("hamlet_act_1","txt","lzh","lzhuf")?;
-    compress_test("tempest_act_5","txt","lzh","lzhuf")
+fn lzss_huff_compression() -> STDRESULT {
+    compress_test("hamlet_act_1","txt","lzh","lzss_huff")?;
+    compress_test("tempest_act_5","txt","lzh","lzss_huff")
 }
 
 #[test]
@@ -127,9 +127,9 @@ fn lzhuf_port_expansion() -> STDRESULT {
 }
 
 #[test]
-fn lzhuf_expansion() -> STDRESULT {
-    expand_test("hamlet_act_1","txt","lzh","lzhuf")?;
-    expand_test("tempest_act_5","txt","lzh","lzhuf")
+fn lzss_huff_expansion() -> STDRESULT {
+    expand_test("hamlet_act_1","txt","lzh","lzss_huff")?;
+    expand_test("tempest_act_5","txt","lzh","lzss_huff")
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn lzhuf_port_invertibility() -> STDRESULT {
 }
 
 #[test]
-fn lzhuf_invertibility() -> STDRESULT {
-    invertibility_test("hamlet_full.txt", "lzhuf")?;
-    invertibility_test("shkspr.dsk", "lzhuf")
+fn lzss_huff_invertibility() -> STDRESULT {
+    invertibility_test("hamlet_full.txt", "lzss_huff")?;
+    invertibility_test("shkspr.dsk", "lzss_huff")
 }

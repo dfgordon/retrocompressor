@@ -1,11 +1,9 @@
 //! LZSS Compression with Adaptive Huffman Encoding
 //! 
-//! This performs compression equivalent to the C program `LZHUF.C` by
+//! This can perform compression equivalent to the C program `LZHUF.C` by
 //! Haruyasu Yoshizaki, Haruhiko Okumura, and Kenji Rikitake.  This is not a direct
-//! port, but it will produce the same bit-for-bit output as `LZHUF.C`.
-//! 
-//! * This transforms buffers, not files (we expect files that are easily buffered)
-//! * The 4 byte header is always little endian
+//! port, but it will produce the same bit-for-bit output as `LZHUF.C`, assuming the
+//! standard options are chosen.  The header is always treated as little endian.
 //! 
 //! This program appears to work more reliably than `LZHUF.C`.
 //! I found that `LZHUF.C` will hang on large files when compiled with `clang 16`,
@@ -20,18 +18,13 @@ use crate::tools::adaptive_huff::*;
 use std::io::{Cursor,Read,Write,Seek,SeekFrom,BufReader,BufWriter,ErrorKind};
 use crate::DYNERR;
 
-// LZSS coding constants
-
-const WIN_SIZE: usize = 4096; // sliding buffer
-const LOOKAHEAD: usize = 60; // lookahead buffer size
-const THRESHOLD: usize = 2; // minimum string length that will be tokenized
-
 /// Structure to perform the LZSS stage of  compression.
 /// This maintains two components.  First a sliding window containing
 /// the symbols in the order encountered ("dictionary"), and second a
 /// tree structure whose nodes point at dictionary locations where matches
 /// have been previously found ("index")
 struct LZSS {
+    opt: crate::Options,
     dictionary: RingBuffer,
     index: Tree,
     match_offset: i32,
@@ -39,10 +32,13 @@ struct LZSS {
 }
 
 impl LZSS {
-    fn new() -> Self {
+    fn create(opt: crate::Options) -> Self {
+        let dictionary = RingBuffer::create(opt.window_size);
+        let index = Tree::create(opt.window_size,256);
         Self {
-            dictionary: RingBuffer::create(WIN_SIZE),
-            index: Tree::create(WIN_SIZE, 256),
+            opt,
+            dictionary,
+            index,
             match_offset: 0,
             match_length: 0
         }
@@ -74,19 +70,19 @@ impl LZSS {
             let mut i: usize = 1;
             // upon exiting this loop, `i` will have the number of matched symbols,
             // and `cmp` will have the difference in first mismatched symbol values.
-            while i < LOOKAHEAD {
+            while i < self.opt.lookahead {
                 cmp = self.dictionary.get(i as i64) as i16 - self.dictionary.get_abs(curs+i) as i16;
                 if cmp != 0 {
                     break;
                 }
                 i += 1;
             }
-            if i > THRESHOLD {
+            if i > self.opt.threshold {
                 if i > self.match_length {
                     // we found a better match, take it
                     self.match_offset = self.dictionary.distance_behind(curs) as i32 - 1;
                     self.match_length = i;
-                    if self.match_length >= LOOKAHEAD {
+                    if self.match_length >= self.opt.lookahead {
                         // cannot get a better match than this, so remove the prior position from the index,
                         // and index this position in its place. TODO: this seems to break the assumption
                         // that farther from root means later in buffer.
@@ -202,6 +198,9 @@ where R: Read + Seek, W: Write + Seek {
     let mut reader = BufReader::new(expanded_in);
     let mut writer = BufWriter::new(compressed_out);
     let expanded_length = reader.seek(SeekFrom::End(0))? - opt.in_offset;
+    if expanded_length >= u32::MAX as u64 {
+        return Err(Box::new(crate::Error::FileTooLarge));
+    }
     reader.seek(SeekFrom::Start(opt.in_offset))?;
     writer.seek(SeekFrom::Start(opt.out_offset))?;
     // write the 32-bit header with length of expanded data
@@ -211,16 +210,16 @@ where R: Read + Seek, W: Write + Seek {
     }
     // init
     let mut bytes = reader.bytes();
-    let mut lzss = LZSS::new();
-    let mut huff = AdaptiveHuffman::create(256 + LOOKAHEAD - THRESHOLD);
+    let mut lzss = LZSS::create(opt.clone());
+    let mut huff = AdaptiveHuffmanCoder::create(256 + opt.lookahead - opt.threshold);
     // setup dictionary
-    let start_pos = WIN_SIZE - LOOKAHEAD;
+    let start_pos = opt.window_size - opt.lookahead;
     for i in 0..start_pos {
-        lzss.dictionary.set(i as i64,b' ');
+        lzss.dictionary.set(i as i64,opt.precursor);
     }
     let mut len = 0;
     lzss.dictionary.set_pos(start_pos);
-    while len < LOOKAHEAD {
+    while len < opt.lookahead {
         match bytes.next() {
             Some(Ok(c)) => {
                 lzss.dictionary.set(len as i64,c);
@@ -234,7 +233,7 @@ where R: Read + Seek, W: Write + Seek {
             }
         }
     }
-    for _i in 1..=LOOKAHEAD {
+    for _i in 1..=opt.lookahead {
         lzss.dictionary.retreat();
         lzss.insert_node()?;
     }
@@ -245,11 +244,11 @@ where R: Read + Seek, W: Write + Seek {
         if lzss.match_length > len {
             lzss.match_length = len;
         }
-        if lzss.match_length <= THRESHOLD {
+        if lzss.match_length <= opt.threshold {
             lzss.match_length = 1;
             huff.encode_char(lzss.dictionary.get(0) as u16,&mut writer);
         } else {
-            huff.encode_char((255-THRESHOLD+lzss.match_length) as u16,&mut writer);
+            huff.encode_char((255-opt.threshold+lzss.match_length) as u16,&mut writer);
             huff.encode_position(lzss.match_offset as u16,&mut writer);
         }
         let last_match_length = lzss.match_length;
@@ -260,14 +259,14 @@ where R: Read + Seek, W: Write + Seek {
                 None => break,
                 Some(Err(e)) => return Err(Box::new(e))
             };
-            lzss.delete_node(LOOKAHEAD as i64)?;
-            lzss.dictionary.set(LOOKAHEAD as i64,c);
+            lzss.delete_node(opt.lookahead as i64)?;
+            lzss.dictionary.set(opt.lookahead as i64,c);
             lzss.dictionary.advance();
             lzss.insert_node()?;
             i += 1;
         }
         while i < last_match_length {
-            lzss.delete_node(LOOKAHEAD as i64)?;
+            lzss.delete_node(opt.lookahead as i64)?;
             lzss.dictionary.advance();
             len -= 1;
             if len > 0 {
@@ -305,11 +304,11 @@ where R: Read + Seek, W: Write + Seek {
        false => u32::MAX
     };
     // init
-    let mut huff = AdaptiveHuffman::create(256 + LOOKAHEAD - THRESHOLD);
-    let mut lzss= LZSS::new();
-    let start_pos = WIN_SIZE - LOOKAHEAD;
+    let mut huff = AdaptiveHuffmanDecoder::create(256 + opt.lookahead - opt.threshold);
+    let mut lzss= LZSS::create(opt.clone());
+    let start_pos = opt.window_size - opt.lookahead;
 	for i in 0..start_pos {
-		lzss.dictionary.set(i as i64,b' ');
+		lzss.dictionary.set(i as i64,opt.precursor);
     }
     lzss.dictionary.set_pos(start_pos);
     // start expanding
@@ -329,7 +328,7 @@ where R: Read + Seek, W: Write + Seek {
                 Err(e) if e.kind()==ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(Box::new(e))
             };    
-			let strlen = c as i64 + THRESHOLD as i64 - 255;
+			let strlen = c as i64 + opt.threshold as i64 - 255;
 			for _k in 0..strlen {
 				let c8 = lzss.dictionary.get(offset);
                 writer.write(&[c8])?;

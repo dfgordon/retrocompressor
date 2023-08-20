@@ -9,10 +9,10 @@ fn main() -> STDRESULT
     let long_help =
 "Examples:
 ---------
-Compress:      `retrocompressor compress -m lzhuf -i my_compressed -o my_expanded`
-Expand:        `retrocompressor expand -m lzhuf -i my_expanded -o my_compressed`";
+Compress:      `retrocompressor compress -m lzss_huff -i my_compressed -o my_expanded`
+Expand:        `retrocompressor expand -m lzss_huff -i my_expanded -o my_compressed`";
 
-    let methods = ["lzhuf-port","lzhuf","td0"];
+    let methods = ["lzhuf-port","lzss_huff","td0"];
 
     let mut main_cmd = Command::new("retrocompressor")
         .about("Compress and expand with retro formats")
@@ -41,7 +41,7 @@ Expand:        `retrocompressor expand -m lzhuf -i my_expanded -o my_compressed`
         let mut out_file = std::fs::File::create(path_out)?;
         let (in_size,out_size) = match method.as_str() {
             "lzhuf-port" => direct_ports::lzhuf::encode(&mut in_file,&mut out_file)?,
-            "lzhuf" => lzss_huff::compress(&mut in_file,&mut out_file,&STD_OPTIONS)?,
+            "lzss_huff" => lzss_huff::compress(&mut in_file,&mut out_file,&STD_OPTIONS)?,
             "td0" => td0::compress(&mut in_file,&mut out_file)?,
             _ => {
                 eprintln!("{} not supported",method);
@@ -59,7 +59,7 @@ Expand:        `retrocompressor expand -m lzhuf -i my_expanded -o my_compressed`
         let mut out_file = std::fs::File::create(path_out)?;
         let (in_size,out_size) = match method.as_str() {
             "lzhuf-port" => direct_ports::lzhuf::decode(&mut in_file,&mut out_file)?,
-            "lzhuf" => lzss_huff::expand(&mut in_file,&mut out_file,&STD_OPTIONS)?,
+            "lzss_huff" => lzss_huff::expand(&mut in_file,&mut out_file,&STD_OPTIONS)?,
             "td0" => td0::expand(&mut in_file,&mut out_file)?,
             _ => {
                 eprintln!("{} not supported",method);

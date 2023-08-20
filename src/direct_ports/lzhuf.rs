@@ -13,8 +13,8 @@
 //! * Some components are gathered into structs
 //! * The 4 byte header is always little endian
 //! 
-//! If you need an equivalent program under MIT license use the module
-//! `retrocompressor::lzss_huff`.
+//! If you need an equivalent program under MIT license, or need more flexibility in
+//! the parameters, use the module `retrocompressor::lzss_huff`.
 //! 
 //! The rust port works more reliably than `LZHUF.C`, which when compiled with `clang 16`,
 //! may hang for files >~ 100K.  A possible explanation is that `LZHUF.C` has trouble when
@@ -598,6 +598,9 @@ pub fn encode<R: Read + Seek, W: Write + Seek>(expanded_in: &mut R, compressed_o
     let mut writer = BufWriter::new(compressed_out);
     // write the 32-bit header with length of expanded data
     let expanded_length = reader.seek(SeekFrom::End(0))?;
+    if expanded_length >= u32::MAX as u64 {
+        return Err(Box::new(crate::Error::FileTooLarge));
+    }
     let header = u32::to_le_bytes(expanded_length as u32);
     writer.write(&header)?;
     reader.seek(SeekFrom::Start(0))?;
