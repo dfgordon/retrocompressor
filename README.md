@@ -4,9 +4,9 @@
 
 The starting motivation for this project is to provide a library that aids in the handling of TD0 files (Teledisk-compatible disk images).  It is envisioned that the scope will expand over time.
 
-At present this performs compression and expansion using LZSS with adaptive Huffman coding.  There are two variants:
 * `direct_ports::lzhuf` - nearly a direct port of the classic `LZHUF` of Okumura et al.
 * `lzss_huff` - signficant rewrite of `LZHUF` with flexible parameters
+* `td0` - convert normal Teledisk to advanced Teledisk, or vice-versa
 
 ## Size Limits
 
@@ -36,6 +36,8 @@ Teledisk images come in an "advanced" variety that uses compression equivalent t
 
 `retrocompressor expand -m td0 -i <advanced.td0> -o <normal.td0>`
 
-As of this writing there is a small caveat.  When expanding a TD0, the compressed data is consumed as a bitstream, and since TD0 does not encode the size of the expanded data, it is possible to have an extra byte tacked onto the end of the expanded data.  Downstream can easily eliminate (or ignore) this extra byte during processing of the TD0 records.
+Testing TD0 is problematic since the original software is no longer available, and the format remains closed.  If you discover any errors please file an issue.
 
-Unfortunately testing TD0 is problematic since the original software is no longer available, and the format remains closed.  If you discover any errors please file an issue.
+### Important
+
+Advanced TD0 images do not record the length of the expanded data. As a result, some decoders have trouble decoding the last symbol (notably [MAME](https://www.mamedev.org/) v0.257 ).  The workaround is to pad the *expanded* TD0 with several disparate-valued bytes *before* compression.  Teledisk evidently did this, so normally there is no problem, but if you are a creator of TD0 images, it is a good idea to include the padding.

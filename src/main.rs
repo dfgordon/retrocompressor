@@ -4,6 +4,19 @@ type STDRESULT = Result<(),Box<dyn std::error::Error>>;
 
 const RCH: &str = "unreachable was reached";
 
+fn ok_to_overwrite(path_out: &str) -> bool {
+    if let Ok(_f) = std::fs::File::open(path_out) {
+        let mut ans = String::new();
+        eprint!("{} exists, overwrite? (y/n) ",path_out);
+        std::io::stdin().read_line(&mut ans).expect("could not read stdin");
+        if ans.trim_end()=="y" || ans.trim_end()=="Y" {
+            return true;
+        }
+        return false;
+    }
+    true
+}
+
 fn main() -> STDRESULT
 {
     let long_help =
@@ -37,8 +50,12 @@ Expand:        `retrocompressor expand -m lzss_huff -i my_expanded -o my_compres
         let path_in = cmd.get_one::<String>("input").expect(RCH);
         let path_out = cmd.get_one::<String>("output").expect(RCH);
         let method = cmd.get_one::<String>("method").expect(RCH);
+        if !ok_to_overwrite(path_out) {
+            eprintln!("abort operation");
+            return Ok(());
+        }
         let mut in_file = std::fs::File::open(path_in)?;
-        let mut out_file = std::fs::File::create(path_out)?;
+        let mut out_file = std::fs::OpenOptions::new().write(true).truncate(false).create(true).open(path_out)?;
         let (in_size,out_size) = match method.as_str() {
             "lzhuf-port" => direct_ports::lzhuf::encode(&mut in_file,&mut out_file)?,
             "lzss_huff" => lzss_huff::compress(&mut in_file,&mut out_file,&STD_OPTIONS)?,
@@ -48,6 +65,7 @@ Expand:        `retrocompressor expand -m lzss_huff -i my_expanded -o my_compres
                 return Err(Box::new(std::fmt::Error));
             }
         };
+        out_file.set_len(out_size)?;
         eprintln!("compressed {} into {}",in_size,out_size);
     }
 
@@ -55,8 +73,12 @@ Expand:        `retrocompressor expand -m lzss_huff -i my_expanded -o my_compres
         let path_in = cmd.get_one::<String>("input").expect(RCH);
         let path_out = cmd.get_one::<String>("output").expect(RCH);
         let method = cmd.get_one::<String>("method").expect(RCH);
+        if !ok_to_overwrite(path_out) {
+            eprintln!("abort operation");
+            return Ok(());
+        }
         let mut in_file = std::fs::File::open(path_in)?;
-        let mut out_file = std::fs::File::create(path_out)?;
+        let mut out_file = std::fs::OpenOptions::new().write(true).truncate(false).create(true).open(path_out)?;
         let (in_size,out_size) = match method.as_str() {
             "lzhuf-port" => direct_ports::lzhuf::decode(&mut in_file,&mut out_file)?,
             "lzss_huff" => lzss_huff::expand(&mut in_file,&mut out_file,&STD_OPTIONS)?,
@@ -66,6 +88,7 @@ Expand:        `retrocompressor expand -m lzss_huff -i my_expanded -o my_compres
                 return Err(Box::new(std::fmt::Error));
             }
         };
+        out_file.set_len(out_size)?;
         eprintln!("expanded {} into {}",in_size,out_size);
     }
 

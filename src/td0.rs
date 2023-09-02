@@ -6,8 +6,9 @@
 //! expands everything following the 12-byte header.
 //! 
 //! Because TD0 does not store the size of the expanded image, there can be
-//! an extra byte at the end of the file after expanding.  It is easy for downstream
-//! to eliminate this possible extra byte during processing of the image data.
+//! an extra byte at the end of the file after expanding.  It appears Teledisk
+//! would usually (maybe always) pad the expanded data by several bytes.
+//! Some decoders (e.g. MAME) count on this padding to correctly decode the last symbol.
 
 use std::io::{Cursor,Read,Write,Seek};
 use crate::DYNERR;
@@ -55,7 +56,7 @@ where R: Read + Seek, W: Write + Seek {
         precursor: b' '
     };
     let (in_size,out_size) = lzss_huff::expand(compressed_in,expanded_out,&opt)?;
-    Ok((in_size,out_size))
+    Ok((in_size+td_header.len() as u64,out_size+td_header.len() as u64))
 }
 
 /// Convert a TD0 image from normal to advanced compression.
@@ -85,7 +86,7 @@ where R: Read + Seek, W: Write + Seek {
         precursor: b' '
     };
     let (in_size,out_size) = lzss_huff::compress(expanded_in,compressed_out,&opt)?;
-    Ok((in_size,out_size))
+    Ok((in_size+td_header.len() as u64,out_size+td_header.len() as u64))
 }
 
 /// Convenience function, calls `compress` with a slice returning a Vec
