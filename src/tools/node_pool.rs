@@ -2,14 +2,12 @@
 //! 
 //! This is a binary tree, tuned for the task of indexing an LZSS dictionary.
 //! The nodes must take unique values from 0..LEN-1, where LEN is the size of the node pool.
-//! The value of the node is the index of its slot in the node pool.
-//! Hence we can define a tree cursor simply by the index into the node pool, i.e., the
-//! node value, index into the node pool, and cursor, are all one and the same.
+//! The node value is a position in the dictionary where a match may be found, which
+//! is the same as the position in the node pool itself.
 //!
 //! For application to LZSS we have the following.
 //! * There can be a root node for each possible symbol, each one occupies a slot in the node pool.
 //! * The size of the node pool corresponds to the size of the sliding window.
-//! * The node value points to a slot in the sliding window.
 //! 
 //! The implementation does a lot of error checking that an optimized code might not do.
 //! This is a choice reflecting the expectation of small retro-files as data sets.
@@ -188,11 +186,12 @@ impl Tree {
     /// If the target slot is already linked, the old links are overwritten.
     pub fn spawn(&mut self, val: usize, side: Side) -> Result<(),Error> {
         if val >= self.pool.len() {
+            log::trace!("spawn out of range {}",val);
             return Err(Error::OutOfRange);
         }
         let curs = self.chk_cursor()?;
         if self.pool[curs].down[side as usize].is_some() {
-            eprintln!("spawn: cannot overwrite {}",self.pool[curs].down[side as usize].unwrap());
+            log::trace!("spawn: cannot overwrite {}",self.pool[curs].down[side as usize].unwrap());
             return Err(Error::NodeExists);
         }
         self.pool[curs].down[side as usize] = Some(val);
@@ -213,7 +212,7 @@ impl Tree {
             self.pool[curs].down = [None,None];
             return Ok(())
         }
-        eprintln!("spawn_root: cannot overwrite {}",curs);
+        log::trace!("spawn_root: cannot overwrite {}",curs);
         Err(Error::NodeExists)
     }
     /// Drop nodes at and below the cursor.  On exit cursor moves up.
@@ -294,7 +293,7 @@ impl Tree {
                 self.set_cursor(curs)?;
             },
             _ => {
-                eprintln!("move: cannot overwrite {}",self.pool[new_parent].down[side as usize].unwrap());
+                log::trace!("move: cannot overwrite {}",self.pool[new_parent].down[side as usize].unwrap());
                 return Err(Error::NodeExists);
             }
         }
@@ -320,7 +319,7 @@ impl Tree {
                 self.set_cursor(curs)?;
             },
             (Some(old_root),false) => {
-                eprintln!("move: cannot overwrite root {}",old_root);
+                log::trace!("move: cannot overwrite root {}",old_root);
                 return Err(Error::NodeExists);
             }
         }
@@ -341,7 +340,7 @@ impl Tree {
         match (self.is_free(new_val)?,force) {
             (true,_) => {},
             (false,false) => {
-                eprintln!("cannot change node value to {}",new_val);
+                log::trace!("cannot change node value to {}",new_val);
                 return Err(Error::NodeExists)
             },
             (false,true) => {

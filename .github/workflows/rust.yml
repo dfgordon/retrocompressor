@@ -49,14 +49,14 @@ jobs:
       TARGET: ${{ matrix.TARGET }}
       OS: ${{ matrix.OS }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install musl GCC wrapper
         run: |
           if [[ $OS =~ ^ubuntu.*$ ]]; then
             sudo apt install musl-tools
           fi
       - name: Cargo cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -69,7 +69,6 @@ jobs:
       - name: Compress
         run: |
           mkdir -p ./artifacts
-          # windows is the only OS using a different convention for executable file name
           if [[ $OS =~ ^windows.*$ ]]; then
               EXEC=$NAME.exe
           else
@@ -83,7 +82,16 @@ jobs:
           mv ./target/$TARGET/release/$EXEC ./$EXEC
           tar -czf ./artifacts/$NAME-$TARGET-$TAG.tar.gz $EXEC
       - name: Archive artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.TARGET }}
+          path: ./artifacts
+  merge:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Merge Artifacts
+        uses: actions/upload-artifact/merge@v4
         with:
           name: result
-          path: ./artifacts
+          pattern: result-*

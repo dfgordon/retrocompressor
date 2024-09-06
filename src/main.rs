@@ -1,5 +1,5 @@
 use clap::{arg,crate_version,Command};
-use retrocompressor::{lzss_huff, td0, direct_ports, STD_OPTIONS};
+use retrocompressor::{lzw,lzss_huff, td0, direct_ports};
 type STDRESULT = Result<(),Box<dyn std::error::Error>>;
 
 const RCH: &str = "unreachable was reached";
@@ -10,6 +10,7 @@ fn ok_to_overwrite(path_out: &str) -> bool {
         eprint!("{} exists, overwrite? (y/n) ",path_out);
         std::io::stdin().read_line(&mut ans).expect("could not read stdin");
         if ans.trim_end()=="y" || ans.trim_end()=="Y" {
+            log::warn!("existing file will not be truncated");
             return true;
         }
         return false;
@@ -19,13 +20,14 @@ fn ok_to_overwrite(path_out: &str) -> bool {
 
 fn main() -> STDRESULT
 {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let long_help =
 "Examples:
 ---------
 Compress:      `retrocompressor compress -m lzss_huff -i my_compressed -o my_expanded`
 Expand:        `retrocompressor expand -m lzss_huff -i my_expanded -o my_compressed`";
 
-    let methods = ["lzhuf-port","lzss_huff","td0"];
+    let methods = ["lzw","lzhuf-port","lzss_huff","td0"];
 
     let mut main_cmd = Command::new("retrocompressor")
         .about("Compress and expand with retro formats")
@@ -57,8 +59,9 @@ Expand:        `retrocompressor expand -m lzss_huff -i my_expanded -o my_compres
         let mut in_file = std::fs::File::open(path_in)?;
         let mut out_file = std::fs::OpenOptions::new().write(true).truncate(false).create(true).open(path_out)?;
         let (in_size,out_size) = match method.as_str() {
+            "lzw" => lzw::compress(&mut in_file,&mut out_file,&lzw::STD_OPTIONS)?,
             "lzhuf-port" => direct_ports::lzhuf::encode(&mut in_file,&mut out_file)?,
-            "lzss_huff" => lzss_huff::compress(&mut in_file,&mut out_file,&STD_OPTIONS)?,
+            "lzss_huff" => lzss_huff::compress(&mut in_file,&mut out_file,&lzss_huff::STD_OPTIONS)?,
             "td0" => td0::compress(&mut in_file,&mut out_file)?,
             _ => {
                 eprintln!("{} not supported",method);
@@ -80,8 +83,9 @@ Expand:        `retrocompressor expand -m lzss_huff -i my_expanded -o my_compres
         let mut in_file = std::fs::File::open(path_in)?;
         let mut out_file = std::fs::OpenOptions::new().write(true).truncate(false).create(true).open(path_out)?;
         let (in_size,out_size) = match method.as_str() {
+            "lzw" => lzw::expand(&mut in_file,&mut out_file,&lzw::STD_OPTIONS)?,
             "lzhuf-port" => direct_ports::lzhuf::decode(&mut in_file,&mut out_file)?,
-            "lzss_huff" => lzss_huff::expand(&mut in_file,&mut out_file,&STD_OPTIONS)?,
+            "lzss_huff" => lzss_huff::expand(&mut in_file,&mut out_file,&lzss_huff::STD_OPTIONS)?,
             "td0" => td0::expand(&mut in_file,&mut out_file)?,
             _ => {
                 eprintln!("{} not supported",method);

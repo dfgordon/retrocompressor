@@ -18,22 +18,54 @@ use crate::tools::adaptive_huff::*;
 use std::io::{Cursor,Read,Write,Seek,SeekFrom,BufReader,BufWriter,ErrorKind};
 use crate::DYNERR;
 
+/// Options controlling compression
+#[derive(Clone)]
+pub struct Options {
+    /// whether to include an optional header
+    pub header: bool,
+    /// starting position in the input file
+    pub in_offset: u64,
+    /// starting position in the output file
+    pub out_offset: u64,
+    /// size of sliding window
+    pub window_size: usize,
+    /// minimum length of match to encode
+    pub threshold: usize,
+    /// lookahead for LZSS matches
+    pub lookahead: usize,
+    /// backfill symbol for LZSS dictionary
+    pub precursor: u8,
+    /// return error if file is larger
+    pub max_file_size: u64
+}
+
+pub const STD_OPTIONS: Options = Options {
+    header: true,
+    in_offset: 0,
+    out_offset: 0,
+    window_size: 4096,
+    threshold: 2,
+    lookahead: 60,
+    precursor: b' ',
+    max_file_size: u32::MAX as u64/4
+};
+
 /// Structure to perform the LZSS stage of  compression.
 /// This maintains two components.  First a sliding window containing
 /// the symbols in the order encountered ("dictionary"), and second a
 /// tree structure whose nodes point at dictionary locations where matches
 /// have been previously found ("index")
 struct LZSS {
-    opt: crate::Options,
-    dictionary: RingBuffer,
+    opt: Options,
+    dictionary: RingBuffer<u8>,
     index: Tree,
     match_offset: i32,
     match_length: usize
 }
 
 impl LZSS {
-    fn create(opt: crate::Options) -> Self {
-        let dictionary = RingBuffer::create(opt.window_size);
+    fn create(opt: Options) -> Self {
+        let dictionary = RingBuffer::create(0,opt.window_size);
         let index = Tree::create(opt.window_size,256);
         Self {
             opt,
@@ -193,12 +225,12 @@ impl LZSS {
 /// `expanded_in` is an object with `Read` and `Seek` traits, usually `std::fs::File`, or `std::io::Cursor<&[u8]>`.
 /// `compressed_out` is an object with `Write` and `Seek` traits, usually `std::fs::File`, or `std::io::Cursor<Vec<u8>>`.
 /// Returns (in_size,out_size) or error, can panic if offsets are out of range.
-pub fn compress<R,W>(expanded_in: &mut R, compressed_out: &mut W, opt: &super::Options) -> Result<(u64,u64),DYNERR>
+pub fn compress<R,W>(expanded_in: &mut R, compressed_out: &mut W, opt: &Options) -> Result<(u64,u64),DYNERR>
 where R: Read + Seek, W: Write + Seek {
     let mut reader = BufReader::new(expanded_in);
     let mut writer = BufWriter::new(compressed_out);
     let expanded_length = reader.seek(SeekFrom::End(0))? - opt.in_offset;
-    if expanded_length >= u32::MAX as u64 {
+    if expanded_length >= opt.max_file_size {
         return Err(Box::new(crate::Error::FileTooLarge));
     }
     reader.seek(SeekFrom::Start(opt.in_offset))?;
@@ -287,11 +319,14 @@ where R: Read + Seek, W: Write + Seek {
 /// `compressed_in` is an object with `Read` and `Seek` traits, usually `std::fs::File`, or `std::io::Cursor<&[u8]>`.
 /// `expanded_out` is an object with `Write` and `Seek` traits, usually `std::fs::File`, or `std::io::Cursor<Vec<u8>>`.
 /// Returns (in_size,out_size) or error, can panic if offsets are out of range.
-pub fn expand<R,W>(compressed_in: &mut R, expanded_out: &mut W, opt: &super::Options) -> Result<(u64,u64),DYNERR>
+pub fn expand<R,W>(compressed_in: &mut R, expanded_out: &mut W, opt: &Options) -> Result<(u64,u64),DYNERR>
 where R: Read + Seek, W: Write + Seek {
     let mut reader = BufReader::new(compressed_in);
     let mut writer = BufWriter::new(expanded_out);
     let compressed_size = reader.seek(SeekFrom::End(0))? - opt.in_offset;
+    if compressed_size > opt.max_file_size {
+        return Err(Box::new(crate::Error::FileTooLarge));
+    }
     reader.seek(SeekFrom::Start(opt.in_offset))?;
     writer.seek(SeekFrom::Start(opt.out_offset))?;
     // get size of expanded data from 32 bit header or set to max
@@ -342,7 +377,7 @@ where R: Read + Seek, W: Write + Seek {
 }
 
 /// Convenience function, calls `compress` with a slice returning a Vec
-pub fn compress_slice(slice: &[u8],opt: &super::Options) -> Result<Vec<u8>,DYNERR> {
+pub fn compress_slice(slice: &[u8],opt: &Options) -> Result<Vec<u8>,DYNERR> {
     let mut src = Cursor::new(slice);
     let mut ans: Cursor<Vec<u8>> = Cursor::new(Vec::new());
     compress(&mut src,&mut ans,opt)?;
@@ -350,35 +385,38 @@ pub fn compress_slice(slice: &[u8],opt: &super::Options) -> Result<Vec<u8>,DYNER
 }
 
 /// Convenience function, calls `expand` with a slice returning a Vec
-pub fn expand_slice(slice: &[u8],opt: &super::Options) -> Result<Vec<u8>,DYNERR> {
+pub fn expand_slice(slice: &[u8],opt: &Options) -> Result<Vec<u8>,DYNERR> {
     let mut src = Cursor::new(slice);
     let mut ans: Cursor<Vec<u8>> = Cursor::new(Vec::new());
     expand(&mut src,&mut ans,opt)?;
     Ok(ans.into_inner())
 }
 
+
+// *************** TESTS *****************
+
 #[test]
 fn compression_works() {
     let test_data = "12345123456789123456789\n".as_bytes();
     let lzhuf_str = "18 00 00 00 DE EF B7 FC 0E 0C 70 13 85 C3 E2 71 64 81 19 60";
-    let compressed = compress_slice(test_data,&crate::STD_OPTIONS).expect("compression failed");
+    let compressed = compress_slice(test_data,&STD_OPTIONS).expect("compression failed");
     assert_eq!(compressed,hex::decode(lzhuf_str.replace(" ","")).unwrap());
 
     let test_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
     let lzhuf_str = "31 00 00 00 EA EB 3D BF 9C 4E FE 1E 16 EA 34 09 1C 0D C0 8C 02 FC 3F 77 3F 57 20 17 7F 1F 5F BF C6 AB 7F A5 AF FE 4C 39 96";
-    let compressed = compress_slice(test_data,&crate::STD_OPTIONS).expect("compression failed");
+    let compressed = compress_slice(test_data,&STD_OPTIONS).expect("compression failed");
     assert_eq!(compressed,hex::decode(lzhuf_str.replace(" ","")).unwrap());
 }
 
 #[test]
 fn invertibility() {
     let test_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
-    let compressed = compress_slice(test_data,&crate::STD_OPTIONS).expect("compression failed");
-    let expanded = expand_slice(&compressed,&crate::STD_OPTIONS).expect("expansion failed");
+    let compressed = compress_slice(test_data,&STD_OPTIONS).expect("compression failed");
+    let expanded = expand_slice(&compressed,&STD_OPTIONS).expect("expansion failed");
     assert_eq!(test_data.to_vec(),expanded);
 
     let test_data = "1234567".as_bytes();
-    let compressed = compress_slice(test_data,&crate::STD_OPTIONS).expect("compression failed");
-    let expanded = expand_slice(&compressed,&crate::STD_OPTIONS).expect("expansion failed");
+    let compressed = compress_slice(test_data,&STD_OPTIONS).expect("compression failed");
+    let expanded = expand_slice(&compressed,&STD_OPTIONS).expect("expansion failed");
     assert_eq!(test_data.to_vec(),expanded[0..7]);
 }

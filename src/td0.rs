@@ -8,11 +8,12 @@
 //! Because TD0 does not store the size of the expanded image, there can be
 //! an extra byte at the end of the file after expanding.  It appears Teledisk
 //! would usually (maybe always) pad the expanded data by several bytes.
-//! Some decoders (e.g. MAME) count on this padding to correctly decode the last symbol.
+//! Some decoders count on this padding to correctly decode the last symbol.
 
 use std::io::{Cursor,Read,Write,Seek};
 use crate::DYNERR;
 use crate::lzss_huff;
+use crate::lzw;
 
 /// Calculate the checksum for the TD0 data in `buf`.
 /// This is only used for the image header, the several other CRC in the TD0 require
@@ -29,8 +30,36 @@ pub fn crc16(crc_seed: u16, buf: &[u8]) -> u16
     crc
 }
 
+pub const TD_V1_OPTIONS: lzw::Options = lzw::Options {
+    header_bits: 16,
+    header_divisor: 4,
+    in_offset: 12,
+    out_offset: 12,
+    chunk_size: 4096,
+    min_symbol: 0,
+    max_symbol: 255,
+    clear_code: None,
+    stop_code: None,
+    min_code_width: 12,
+    max_code_width: 12,
+    ord: crate::BitOrder::Lsb0,
+    max_file_size: 3_000_000
+};
+
+pub const TD_V2_OPTIONS: lzss_huff::Options = lzss_huff::Options {
+    header: false,
+    in_offset: 12,
+    out_offset: 12,
+    window_size: 4096,
+    threshold: 2,
+    lookahead: 60,
+    precursor: b' ',
+    max_file_size: 3_000_000
+};
+
 /// Convert a TD0 image from advanced compression to normal.
-/// The heavy lifting is done by the `lzss_huff` module.
+/// For Teledisk 2.x, the heavy lifting is done by the `lzss_huff` module.
+/// For Teledisk 1.x, the heavy lifting is done by the `lzw` module.
 pub fn expand<R,W>(compressed_in: &mut R, expanded_out: &mut W) -> Result<(u64,u64),DYNERR>
 where R: Read + Seek, W: Write + Seek {
     let mut td_header: [u8;12] = [0;12];
@@ -46,21 +75,19 @@ where R: Read + Seek, W: Write + Seek {
     let crc = u16::to_le_bytes(crc16(0,&td_header[0..10]));
     td_header[10..12].copy_from_slice(&crc);
     expanded_out.write_all(&td_header)?;
-    let opt = crate::Options {
-        header: false,
-        in_offset: 12,
-        out_offset: 12,
-        window_size: 4096,
-        threshold: 2,
-        lookahead: 60,
-        precursor: b' '
-    };
-    let (in_size,out_size) = lzss_huff::expand(compressed_in,expanded_out,&opt)?;
-    Ok((in_size+td_header.len() as u64,out_size+td_header.len() as u64))
+    // Dunfield's notes suggest looking at nibble values, but we find it is the decimal digits that count
+    if td_header[4] < 20 {
+        let (in_size,out_size) = lzw::expand(compressed_in,expanded_out,&TD_V1_OPTIONS)?;
+        Ok((in_size+td_header.len() as u64,out_size+td_header.len() as u64))
+    } else {
+        let (in_size,out_size) = lzss_huff::expand(compressed_in,expanded_out,&TD_V2_OPTIONS)?;
+        Ok((in_size+td_header.len() as u64,out_size+td_header.len() as u64))
+    }
 }
 
 /// Convert a TD0 image from normal to advanced compression.
-/// The heavy lifting is done by the `lzss_huff` module.
+/// For Teledisk 2.x, the heavy lifting is done by the `lzss_huff` module.
+/// For Teledisk 1.x, the heavy lifting is done by the `lzw` module.
 pub fn compress<R,W>(expanded_in: &mut R, compressed_out: &mut W) -> Result<(u64,u64),DYNERR>
 where R: Read + Seek, W: Write + Seek {
     let mut td_header: [u8;12] = [0;12];
@@ -76,17 +103,14 @@ where R: Read + Seek, W: Write + Seek {
     let crc = u16::to_le_bytes(crc16(0,&td_header[0..10]));
     td_header[10..12].copy_from_slice(&crc);
     compressed_out.write_all(&td_header)?;
-    let opt = crate::Options {
-        header: false,
-        in_offset: 12,
-        out_offset: 12,
-        window_size: 4096,
-        threshold: 2,
-        lookahead: 60,
-        precursor: b' '
-    };
-    let (in_size,out_size) = lzss_huff::compress(expanded_in,compressed_out,&opt)?;
-    Ok((in_size+td_header.len() as u64,out_size+td_header.len() as u64))
+    // Dunfield's notes suggest looking at nibble values, but we find it is the decimal digits that count
+    if td_header[4] < 20 {
+        let (in_size,out_size) = lzw::compress(expanded_in,compressed_out,&TD_V1_OPTIONS)?;
+        Ok((in_size+td_header.len() as u64,out_size+td_header.len() as u64))
+    } else {
+        let (in_size,out_size) = lzss_huff::compress(expanded_in,compressed_out,&TD_V2_OPTIONS)?;
+        Ok((in_size+td_header.len() as u64,out_size+td_header.len() as u64))
+    }
 }
 
 /// Convenience function, calls `compress` with a slice returning a Vec

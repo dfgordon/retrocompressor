@@ -8,5 +8,9 @@ reference file | legacy code | compiler
 ------|------|------
 hamlet_act_1.lzh | LZHUF.C | clang 16.0.6
 tempest_act_5.lzh | LZHUF.C | clang 16.0.6
+td105.adv.td0 | Teledisk 1.05 | n/a
+td105.norm.td0 | Teledisk 1.05 | n/a
+td215.adv.td0 | Teledisk 2.15 | n/a
+td215.norm.td0 | Teledisk 2.15 | n/a
 
 The larger files cannot be compressed by `LZHUF.C`, at least not when compiled with `clang`.  As a result we can only do invertibility tests on the large files.  The file `shkspr.dsk` is a disk image containing `hamlet_full.txt` in compressed form, which can in turn be compressed (because of the empty sectors).  This provides a test of a binary file.

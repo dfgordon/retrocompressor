@@ -6,11 +6,12 @@ The starting motivation for this project is to provide a library that aids in th
 
 * `direct_ports::lzhuf` - nearly a direct port of the classic `LZHUF` of Okumura et al.
 * `lzss_huff` - signficant rewrite of `LZHUF` with flexible parameters
+* `lzw` - LZW with fixed code width, other parameters flexible
 * `td0` - convert normal Teledisk to advanced Teledisk, or vice-versa
 
 ## Size Limits
 
-This is not optimized for large files.  Some 32-bit integers used to describe file sizes have been retained since they are part of the format.  As of this writing, there are no status indicators available during processing, status only becomes available upon completion or failure.
+This is not optimized for large files.  Some 32-bit integers used to describe file sizes have been retained since they are part of the format.  The maximum size, beyond which an error is returned, defaults to 3 MB for TD0 files, 1 GB otherwise.
 
 ## Executable
 
@@ -30,14 +31,12 @@ This crate can be used as a library.  For an example of how to use the library s
 
 ## Teledisk
 
-Teledisk images come in an "advanced" variety that uses compression equivalent to Okumura's `LZHUF` (as far as can be established), which in turn can be emulated using module `lzss_huff`.  However, the Teledisk header and the `LZHUF` header are different, and the Teledisk header needs to be modified whenever advanced compression is added or subtracted.  As a convenience there is a module `td0` that handles this transparently.  This can also be accessed from the command line:
+Teledisk images come in an "advanced" variety that uses LZW (v1.x) or LZSS/Huffman (v2.x) compression.  Module `lzw` handles the former case, while module `lzss_huff` handles the latter.  However, options need to be set correctly, and the Teledisk header needs to be modified whenever advanced compression is added or subtracted.  As a convenience there is a module `td0` that handles all known cases transparently.  This can also be accessed from the command line:
 
 `retrocompressor compress -m td0 -i <normal.td0> -o <advanced.td0>`
 
 `retrocompressor expand -m td0 -i <advanced.td0> -o <normal.td0>`
 
-Testing TD0 is problematic since the original software is no longer available, and the format remains closed.  If you discover any errors please file an issue.
-
 ### Important
 
-Advanced TD0 images do not record the length of the expanded data. As a result, some decoders have trouble decoding the last symbol (notably [MAME](https://www.mamedev.org/) v0.257 ).  The workaround is to pad the *expanded* TD0 with several disparate-valued bytes *before* compression.  Teledisk evidently did this, so normally there is no problem, but if you are a creator of TD0 images, it is a good idea to include the padding.
+Advanced TD0 images in v2.x do not record the length of the expanded data. As a result, some decoders have trouble decoding the last symbol.  The workaround is to pad the *expanded* TD0 with several disparate-valued bytes *before* compression.  Teledisk evidently did this, so normally there is no problem, but if you are a creator of TD0 images, it is a good idea to include the padding.
