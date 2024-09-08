@@ -1,4 +1,8 @@
 //! LZW Compression
+//! 
+//! This currently supports fixed code widths only, other parameters are flexible.
+//! Efficiency is probably not optimal, we rely on `std::collections::HashMap` to perform
+//! fast lookups on keys of the type `(usize,usize)`.
 
 use bit_vec::BitVec;
 use crate::BitOrder;
@@ -268,7 +272,6 @@ struct LZW {
 impl LZW {
     /// Create LZW structures, including initial dictionary, can
     /// also be used to reset LZW for a new block.
-    /// Dictionary position is set to first open slot.
     /// Allowed to panic if options cannot be satisfied.
     fn create(opt: Options) -> Self {
         if opt.min_code_width != opt.max_code_width {
@@ -288,7 +291,8 @@ impl LZW {
         }
         lzw
     }
-    /// Walk back through the concatentation sequence to form the string
+    /// Walk back through the concatentation sequence to form the string, this does a lookup
+    /// for every symbol, so this may be where we pay the biggest price for sub-optimal hashing.
     fn get_string(&self,mut code: usize) -> Vec<u8> {
         let mut rev = Vec::new();
         loop {

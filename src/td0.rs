@@ -9,6 +9,7 @@
 //! an extra byte at the end of the file after expanding.  It appears Teledisk
 //! would usually (maybe always) pad the expanded data by several bytes.
 //! Some decoders count on this padding to correctly decode the last symbol.
+//! The aforementioned issue does not apply to v1.x (LZW) compression.
 
 use std::io::{Cursor,Read,Write,Seek};
 use crate::DYNERR;

@@ -3,6 +3,7 @@
 //! Compress or expand retro file formats
 //! * `direct_ports::lzhuf` is a nearly direct port of `LZHUF` by Okumura et al.
 //! * `lzss_huff` produces output compatible with `LZHUF` using a different implementation
+//! * `lzw` performs LZW compression with various options
 //! * `td0` converts between advanced (compressed) and normal (expanded) TD0 disk image formats
 //! 
 //! The compression/expansion functions are generics that operate on trait objects
