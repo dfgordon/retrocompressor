@@ -469,8 +469,8 @@ where R: Read + Seek, W: Write + Seek {
                 }
                 old_coder_state = coder.clone();
                 write_offset_header = save_offset;
-                // back up to catch the character left in the dictionary that will be cleared
-                read_chunk_offset = reader.stream_position()?;// - 1;
+                // read-position should be on the last symbol that didn't match
+                read_chunk_offset = reader.stream_position()?;
                 break;
             }
         }
@@ -656,8 +656,8 @@ fn invertibility() {
     let mut opt = STD_OPTIONS;
     opt.ord = BitOrder::Msb0;
     let test_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
-    let compressed = compress_slice(test_data,&STD_OPTIONS).expect("compression failed");
-    let expanded = expand_slice(&compressed,&STD_OPTIONS).expect("expansion failed");
+    let compressed = compress_slice(test_data,&opt).expect("compression failed");
+    let expanded = expand_slice(&compressed,&opt).expect("expansion failed");
     assert_eq!(test_data.to_vec(),expanded);
 }
 
@@ -668,8 +668,8 @@ fn invertibility_16() {
     opt.min_code_width = 16;
     opt.max_code_width = 16;
     let test_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
-    let compressed = compress_slice(test_data,&STD_OPTIONS).expect("compression failed");
-    let expanded = expand_slice(&compressed,&STD_OPTIONS).expect("expansion failed");
+    let compressed = compress_slice(test_data,&opt).expect("compression failed");
+    let expanded = expand_slice(&compressed,&opt).expect("expansion failed");
     assert_eq!(test_data.to_vec(),expanded);
 }
 
@@ -679,8 +679,8 @@ fn invertibility_td_mode() {
     opt.in_offset = 0;
     opt.out_offset = 0;
     let test_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
-    let compressed = compress_slice(test_data,&STD_OPTIONS).expect("compression failed");
-    let expanded = expand_slice(&compressed,&STD_OPTIONS).expect("expansion failed");
+    let compressed = compress_slice(test_data,&opt).expect("compression failed");
+    let expanded = expand_slice(&compressed,&opt).expect("expansion failed");
     assert_eq!(test_data.to_vec(),expanded);
 }
 
@@ -690,7 +690,7 @@ fn invertibility_with_clear() {
     opt.ord = BitOrder::Msb0;
     opt.chunk_size = 14;
     let test_data = "I am Sam. Sam I am. I do not like this Sam I am.\n".as_bytes();
-    let compressed = compress_slice(test_data,&STD_OPTIONS).expect("compression failed");
-    let expanded = expand_slice(&compressed,&STD_OPTIONS).expect("expansion failed");
+    let compressed = compress_slice(test_data,&opt).expect("compression failed");
+    let expanded = expand_slice(&compressed,&opt).expect("expansion failed");
     assert_eq!(test_data.to_vec(),expanded);
 }
